@@ -1,11 +1,24 @@
-import click
 import gzip
+
+import click
+
 
 @click.command()
 @click.argument("tgz", type=click.Path(exists=True))
-@click.option("--db-path", default="~/.postmark/emails.db", help="Path to the SQLite DB")
-@click.option("--parquet-dir", default="~/.postmark/parquet", help="Directory to store Parquet files")
-@click.option("--dry-run", is_flag=True, default=False, help="Perform a dry run without side effects")
+@click.option(
+    "--db-path", default="~/.postmark/emails.db", help="Path to the SQLite DB"
+)
+@click.option(
+    "--parquet-dir",
+    default="~/.postmark/parquet",
+    help="Directory to store Parquet files",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Perform a dry run without side effects",
+)
 def main(tgz: str, db_path: str, parquet_dir: str, dry_run: bool) -> None:
     # Read the specified gzip file in streaming mode
     count = 0
