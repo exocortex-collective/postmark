@@ -1,8 +1,9 @@
-
 import uuid
 from datetime import timedelta
 from typing import Callable, Optional
+
 from postmark.email.parser import Email
+
 
 def detect_thread(email: Email, resolver: Callable[[str], Optional[Email]]) -> str:
     """
@@ -31,7 +32,7 @@ def detect_thread(email: Email, resolver: Callable[[str], Optional[Email]]) -> s
         for prefix in ["re:", "fwd:"]:
             prefix_lower = prefix.lower()
             while s.lower().startswith(prefix_lower):
-                s = s[len(prefix):].strip()
+                s = s[len(prefix) :].strip()
         return s
 
     norm_subj = strip_prefixes(email.subject or "")
