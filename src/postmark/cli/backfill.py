@@ -9,7 +9,7 @@ def normalize_path(p):
 
 
 @click.command()
-@click.argument("gz", type=click.Path(exists=False))
+@click.argument("gz", type=click.Path(exists=True))
 @click.option(
     "--db-path", default="~/.postmark/emails.db", help="Path to the SQLite DB"
 )
@@ -27,13 +27,9 @@ def normalize_path(p):
 def main(gz: str, db_path: str, parquet_dir: str, dry_run: bool) -> None:
     # Normalize all paths
     gz = normalize_path(gz)
-    print(f"gz: {gz}")
     db_path = normalize_path(db_path)
     parquet_dir = normalize_path(parquet_dir)
-    
-    # Now check whether the expanded path exists
-    if not os.path.exists(gz):
-        raise click.ClickException(f"File does not exist: {gz}")
+
     # Read the specified gzip file in streaming mode
     count = 0
     with gzip.open(gz, "rb") as f:
