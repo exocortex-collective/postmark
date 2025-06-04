@@ -25,8 +25,8 @@
 
 ### S3 Attachments
 
-* [ ] **1.5** Build S3 wrapper (`S3Client`) targeting local MinIO.
-* [ ] **1.6** Verify upload and retrieval in integration test.
+* [x] **1.5** Build S3 wrapper (`S3Client`) targeting local MinIO.
+* [x] **1.6** Verify upload and retrieval in integration test.
 
 ## Phase 2 — Email Model & Parsing
 
