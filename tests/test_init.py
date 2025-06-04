@@ -10,10 +10,10 @@ def test_version():
 
 def test_package_imports():
     """Test that submodules can be imported."""
-    import postmark.storage
-    import postmark.email
-    import postmark.sync
     import postmark.cli
+    import postmark.email
+    import postmark.storage
+    import postmark.sync
 
     # Basic smoke test - modules should import without error
     assert postmark.storage is not None
