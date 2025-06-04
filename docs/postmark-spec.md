@@ -1,5 +1,9 @@
 # Postmark Email DataStore Specification
 
+> **Update**: Current Gmail exports arrive as a single `.gz` file containing one `.mbox` file. 
+> Our backfill command reads directly from this `.gz` stream instead of multiple `.eml` files 
+> packed into a tar archive.
+
 ## Project Overview
 
 Postmark is a high-performance email datastore designed to ingest, store, and expose email data for automation tasks and AI agents. The system processes Gmail exports and maintains ongoing synchronization while providing efficient access through an MCP (Model Context Protocol) interface.
