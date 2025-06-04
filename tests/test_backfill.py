@@ -22,7 +22,7 @@ def test_backfill_dry_run(tmp_path: Path) -> None:
     assert result.exit_code == 0
 
 
-def test_backfill_duplicates_and_attachments(tmp_path: Path):
+def test_backfill_duplicates_and_attachments(tmp_path: Path) -> None:
     """
     Creates a .gz with two duplicated EMLs and one unique EML;
     verifies that only two are stored and uploads attachments to S3 with the correct key.

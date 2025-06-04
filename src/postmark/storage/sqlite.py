@@ -1,6 +1,8 @@
 import sqlite3
 from sqlite3 import Connection
 
+from postmark.email.parser import Email
+
 
 def create_connection(db_path: str) -> Connection:
     """Return a new SQLite connection to the specified database path."""
@@ -55,7 +57,7 @@ def upgrade(conn: Connection) -> None:
     conn.commit()
 
 
-def insert_email(conn: Connection, email_obj, thread_id: str) -> None:
+def insert_email(conn: Connection, email_obj: Email, thread_id: str) -> None:
     """
     Insert an Email record into the 'emails' table.
     """

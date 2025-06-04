@@ -1,9 +1,10 @@
 import os
 import tempfile
+from pathlib import Path
 from typing import IO, Iterator, Optional
 
 import click
-import indexed_gzip as igz
+import indexed_gzip as igz  # type: ignore[import]
 import pyarrow as pa
 from dotenv import load_dotenv
 
@@ -48,7 +49,7 @@ def _extract_eml_blobs(f: IO[bytes]) -> Iterator[bytes]:
     """
     Extract complete EML blobs from a mbox file, looking for lines starting with 'From '.
     """
-    current_email = []
+    current_email: list[bytes] = []
     for line in f:
         # Check if this line indicates a new email boundary
         if line.startswith(b"From "):
@@ -181,9 +182,10 @@ def main(
 
                     # Batch Parquet write
                     if len(batch_rows) >= batch_size:
+                        out_path = Path(parquet_dir) / "emails.parquet"
                         write_parquet(
                             pa.Table.from_pylist(batch_rows),
-                            os.path.join(parquet_dir, "emails.parquet"),
+                            out_path,
                         )
                         batch_rows.clear()
 
@@ -200,9 +202,10 @@ def main(
 
     # Write any remaining batch
     if not dry_run and batch_rows:
+        out_path = Path(parquet_dir) / "emails.parquet"
         write_parquet(
             pa.Table.from_pylist(batch_rows),
-            os.path.join(parquet_dir, "emails.parquet"),
+            out_path,
         )
         batch_rows.clear()
 
