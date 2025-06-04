@@ -1,10 +1,11 @@
 import datetime
+from typing import Optional
 
 from postmark.email.parser import Email
 from postmark.email.threading import detect_thread
 
 
-def fake_resolver(key: str):
+def fake_resolver(key: str) -> Optional[Email]:
     """
     Fake callback that can return hard-coded Emails.
     Suppose references are stored in a dict,
