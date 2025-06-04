@@ -15,6 +15,7 @@ dependencies = [
     "prometheus-client>=0.16.0",
     "pydantic>=2.0.0",
     "charset-normalizer>=3.0.0",
+    "beautifulsoup4>=4.12.0",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +28,7 @@ dev = [
     "pre-commit>=3.0.0",
     "types-requests",
     "types-boto3",
+    "types-beautifulsoup4",
     "moto>=4.0.0",
 ]
 

@@ -15,5 +15,6 @@
 - Provide fixture EMLs (plain & HTML).
 - Assert parser fills all mandatory fields.
 - Assert `normalise_body` removes `> quoted` lines.
+- Run tests before comitting
 
 Write the code and the tests.
