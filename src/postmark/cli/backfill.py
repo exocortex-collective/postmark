@@ -22,9 +22,9 @@ def parse_eml_from_bytes(eml_raw: bytes) -> Email:
     """Parse EML from raw bytes."""
     # This is a placeholder - would need actual implementation
     # For now, create a minimal Email object
-    from datetime import datetime
     import uuid
-    
+    from datetime import datetime
+
     return Email(
         uuid=str(uuid.uuid4()),
         message_id=None,
@@ -33,7 +33,7 @@ def parse_eml_from_bytes(eml_raw: bytes) -> Email:
         from_addr="test@example.com",
         body_text="Test body",
         body_html="",
-        attachments=[]
+        attachments=[],
     )
 
 
@@ -98,15 +98,17 @@ def main(gz: str, db_path: str, parquet_dir: str, dry_run: bool) -> None:
                         for attach in parse_eml_result.attachments:
                             key = f"{parse_eml_result.uuid}/1.2/{attach}"
                             # s3_client.put_bytes(key, b"PLACEHOLDER_ATTACHMENT_CONTENT")
-                    
+
                     # Add to batch for Parquet write
-                    batch_rows.append({
-                        'uuid': parse_eml_result.uuid,
-                        'subject': parse_eml_result.subject,
-                        'from_addr': parse_eml_result.from_addr,
-                        'body_text': parse_eml_result.body_text
-                    })
-                    
+                    batch_rows.append(
+                        {
+                            "uuid": parse_eml_result.uuid,
+                            "subject": parse_eml_result.subject,
+                            "from_addr": parse_eml_result.from_addr,
+                            "body_text": parse_eml_result.body_text,
+                        }
+                    )
+
                     # Batch Parquet write
                     if len(batch_rows) >= batch_size:
                         # write_parquet(pa.Table.from_pylist(batch_rows), parquet_dir)
@@ -114,9 +116,9 @@ def main(gz: str, db_path: str, parquet_dir: str, dry_run: bool) -> None:
 
                 if count % 1000 == 0:
                     click.echo(f"Processed {count} lines so far...")
-                    
+
             except Exception as e:
                 click.echo(f"Error processing email {count}: {e}")
                 continue
-                
+
     click.echo(f"Processed {count} lines total (dry run: {dry_run}).")
