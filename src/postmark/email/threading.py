@@ -8,16 +8,16 @@ from postmark.email.parser import Email
 def detect_thread(email: Email, resolver: Callable[[str], Optional[Email]]) -> str:
     """
     Detect thread ID for an email using header-based and subject-based methods.
-    
+
     1) If email.in_reply_to or email.references, try each (last to first).
     2) If any are known, return parent's thread_id.
     3) Otherwise, fallback to subject-based matching (strip "Re: ", "Fwd: ") within 7 days.
     4) If that fails, generate a new thread ID.
-    
+
     Args:
         email: Email object to find thread for
         resolver: Function that takes a message ID or subject key and returns Email or None
-        
+
     Returns:
         Thread ID string (existing or newly generated UUID)
     """
