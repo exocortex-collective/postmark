@@ -1,7 +1,9 @@
-import pytest
 import boto3
+import pytest
 from moto import mock_s3
+
 from postmark.storage.s3 import S3Client
+
 
 @mock_s3
 def test_put_and_get():

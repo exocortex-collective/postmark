@@ -8,7 +8,7 @@ class S3Client:
         endpoint_url: str,
         aws_access_key_id: str,
         aws_secret_access_key: str,
-        bucket_name: str
+        bucket_name: str,
     ):
         self.s3 = boto3.resource(
             "s3",
