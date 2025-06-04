@@ -24,14 +24,14 @@ def test_backfill_dry_run(tmp_path: Path) -> None:
 
 def test_backfill_duplicates_and_attachments(tmp_path: Path):
     """
-    Crea .gz con dos EMLs duplicados y uno único;
-    verifica se guardan 2 y sube adjuntos a S3 con la key apropiada.
+    Creates a .gz with two duplicated EMLs and one unique EML;
+    verifies that only two are stored and uploads attachments to S3 with the correct key.
     """
     from click.testing import CliRunner
     import gzip
     gz_file = tmp_path / "dupe_emails.mbox.gz"
 
-    # Simular mini mbox con 3 'From ' boundaries: 2 duplicados, 1 distinto con un "ATTACH:" placeholder
+    # Simulate a small mbox with 3 'From ' boundaries: 2 duplicates, 1 unique with an "ATTACH:" placeholder
     with gzip.open(gz_file, "wb") as f:
         f.write(b"From me@foo.com\nSubject: Foo\n\nBody A\n")
         f.write(b"From me@foo.com\nSubject: Foo\n\nBody A\n")  # Dup
@@ -47,7 +47,7 @@ def test_backfill_duplicates_and_attachments(tmp_path: Path):
     assert "Processed 3" in result.output
     assert result.exit_code == 0
 
-    # En una prueba real con mocks de S3 y SQLite, comprueba:
-    # - que se insertaron 2 correos en DB
-    # - que se subió "somefile.pdf" a S3 en la ruta {uuid}/1.2/somefile.pdf
-    # - que el duplicado no está en DB
+    # In a real test with S3 and SQLite mocks, verify:
+    # - that 2 emails are inserted into the DB
+    # - that "somefile.pdf" is uploaded to S3 at {uuid}/1.2/somefile.pdf
+    # - that the duplicate is not stored in the DB

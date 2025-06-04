@@ -86,7 +86,7 @@ def main(gz: str, db_path: str, parquet_dir: str, dry_run: bool, fail_fast: bool
     db_path = normalize_path(db_path)
     parquet_dir = normalize_path(parquet_dir)
 
-    # S3 y SQLite
+    # Initialize the S3 client and SQLite
     s3_client = S3Client(
         endpoint_url=None,
         aws_access_key_id="CHANGEME",
