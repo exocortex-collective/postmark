@@ -1,10 +1,10 @@
-from dataclasses import dataclass, field
-from datetime import datetime
-from pathlib import Path
-from email.parser import BytesParser
-from email.policy import default
 import re
 import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from email.parser import BytesParser
+from email.policy import default
+from pathlib import Path
 
 
 @dataclass
@@ -33,6 +33,7 @@ def parse_eml(path: Path) -> Email:
     # (You might need dateutil.parser.parse or time.strptime)
     # For brevity, below is a naive approach:
     from email.utils import parsedate_to_datetime
+
     dt = parsedate_to_datetime(date_str) if date_str else datetime.utcnow()
 
     # Extract body text & HTML
@@ -43,7 +44,9 @@ def parse_eml(path: Path) -> Email:
         ctype = part.get_content_type()
         if ctype in ["text/plain", "text/html"]:
             payload = part.get_payload(decode=True) or b""
-            text_part = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+            text_part = payload.decode(
+                part.get_content_charset() or "utf-8", errors="replace"
+            )
             if ctype == "text/plain":
                 body_text.append(text_part)
             else:
@@ -51,7 +54,7 @@ def parse_eml(path: Path) -> Email:
         elif part.get_filename():
             # It's an attachment
             attachments.append(part.get_filename() or "unknown.bin")
-    
+
     return Email(
         uuid=eml_uuid,
         message_id=message_id,
