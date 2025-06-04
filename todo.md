@@ -20,8 +20,8 @@
 
 ### Parquet
 
-* [ ] **1.3** Create `postmark/storage/columnar.py` with `write_parquet` / `read_parquet`.
-* [ ] **1.4** Partition files by `YYYY‑MM` folder, ZSTD compression.
+* [x] **1.3** Create `postmark/storage/columnar.py` with `write_parquet` / `read_parquet`.
+* [x] **1.4** Partition files by `YYYY‑MM` folder, ZSTD compression.
 
 ### S3 Attachments
 
