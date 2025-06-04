@@ -2,7 +2,7 @@
 
 > **Update**: Current Gmail exports arrive as a single `.gz` file containing one `.mbox` file. 
 > Our backfill command reads directly from this `.gz` stream instead of multiple `.eml` files 
-> packed into a tar archive.
+> packed into a gzip archive.
 
 ## Project Overview
 
@@ -42,7 +42,7 @@ postmark/
 
 ### Core Programs
 
-1. **postmark-backfill**: Processes Gmail export .tgz files
+1. **postmark-backfill**: Processes Gmail export .gz files
 2. **postmark-sync**: Ongoing synchronization service
 3. **postmark-mcp**: MCP service for AI agent access
 4. **postmark-reindex**: Rebuilds indices with new algorithms
@@ -275,7 +275,7 @@ cache:
 ### Bulk Loader
 
 1. **Failed Emails**: 
-   - Write to dead letter queue with .tgz offset
+   - Write to dead letter queue with .gz offset
    - Continue processing (unless --fail-fast)
    - Generate error report: `failed_emails_{timestamp}.jsonl`
 
@@ -287,7 +287,7 @@ cache:
 3. **Manifest Tracking**:
    ```json
    {
-     "file": "gmail-export-1.tgz",
+     "file": "gmail-export-1.gz",
      "checksum": "sha256:...",
      "status": "partial",
      "last_offset": 12345678,
@@ -452,7 +452,7 @@ services:
 - **Target**: Process 70GB overnight (~8 hours)
 - **Rate**: 1000-2000 emails/second per worker
 - **Memory**: 30GB available (WSL environment)
-- **Parallelism**: 2-3 .tgz files simultaneously
+- **Parallelism**: 2-3 .gz files simultaneously
 
 ### Phase 2 (Sync)
 - **Latency**: 5-30 seconds from Gmail receipt
@@ -493,7 +493,7 @@ pytest
 docker-compose up -d
 
 # Run bulk loader
-postmark-backfill gmail-export-1.tgz
+postmark-backfill gmail-export-1.gz
 ```
 
 ### Release Process
