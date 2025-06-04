@@ -36,7 +36,10 @@ def parse_eml(path: Path) -> Email:
     # For brevity, below is a naive approach:
     from email.utils import parsedate_to_datetime
 
-    dt = parsedate_to_datetime(date_str) if date_str else datetime.utcnow()
+    parsed_dt = None
+    if date_str:
+        parsed_dt = parsedate_to_datetime(date_str)
+    dt = parsed_dt if parsed_dt else datetime.utcnow()
 
     # Extract body text & HTML
     body_text = []
