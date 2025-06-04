@@ -38,10 +38,22 @@ def parse_eml_from_bytes(eml_raw: bytes) -> Email:
 
 
 def _extract_eml_blobs(f: IO[bytes]) -> Iterator[bytes]:
-    """Extract EML blobs from gzip file."""
-    # Placeholder implementation - yields each line as bytes
+    """
+    Extract complete EML blobs from a mbox file, looking for lines starting with 'From '.
+    """
+    current_email = []
     for line in f:
-        yield line
+        # Check if this line indicates a new email boundary
+        if line.startswith(b"From "):
+            # If we already accumulated lines, yield them
+            if current_email:
+                yield b"".join(current_email)
+                current_email.clear()
+        current_email.append(line)
+
+    # Yield any remaining lines after the final boundary
+    if current_email:
+        yield b"".join(current_email)
 
 
 @click.command()
