@@ -1,6 +1,11 @@
 import gzip
+import os
 
 import click
+
+
+def normalize_path(p):
+    return os.path.abspath(os.path.normpath(os.path.expandvars(os.path.expanduser(p))))
 
 
 @click.command()
@@ -20,6 +25,11 @@ import click
     help="Perform a dry run without side effects",
 )
 def main(gz: str, db_path: str, parquet_dir: str, dry_run: bool) -> None:
+    # Normalize all paths
+    gz = normalize_path(gz)
+    print(f"gz: {gz}")
+    db_path = normalize_path(db_path)
+    parquet_dir = normalize_path(parquet_dir)
     # Read the specified gzip file in streaming mode
     count = 0
     with gzip.open(gz, "rb") as f:
