@@ -19,6 +19,8 @@ class Email:
     body_text: str
     body_html: str
     attachments: list[str] = field(default_factory=list)
+    in_reply_to: str | None = None
+    references: list[str] = field(default_factory=list)
 
 
 def parse_eml(path: Path) -> Email:
