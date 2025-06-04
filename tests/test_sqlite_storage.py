@@ -2,6 +2,7 @@ import sqlite3
 import pytest
 from postmark.storage.sqlite import create_connection, upgrade
 
+
 def test_schema_created(tmp_path) -> None:
     """Ensure 'emails' table and schema_version=1 are created."""
     db_path = tmp_path / "test.db"
@@ -9,7 +10,9 @@ def test_schema_created(tmp_path) -> None:
     upgrade(conn)
 
     # Check that 'emails' table exists
-    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='emails';")
+    cursor = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='emails';"
+    )
     assert cursor.fetchone() is not None, "'emails' table not created"
 
     # Check schema_version=1

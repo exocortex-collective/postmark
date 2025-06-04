@@ -1,9 +1,11 @@
 import sqlite3
 from sqlite3 import Connection
 
+
 def create_connection(db_path: str) -> Connection:
     """Return a new SQLite connection to the specified database path."""
     return sqlite3.connect(db_path)
+
 
 def create_schema(conn: Connection) -> None:
     """Create the emails table (only) according to the spec."""
@@ -22,6 +24,7 @@ def create_schema(conn: Connection) -> None:
         );
         """
     )
+
 
 def upgrade(conn: Connection) -> None:
     """
