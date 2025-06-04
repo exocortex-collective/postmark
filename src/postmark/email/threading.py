@@ -10,16 +10,16 @@ def detect_thread(email: Email, resolver: Callable[[str], Optional[Email]]) -> s
     Detect thread ID for an email using header-based and subject-based methods.
 
     1) If email.in_reply_to or email.references, try each (last to first).
-    2) If any are known, return parent's thread_id.
+    2) If any are known, return parent's thread_id or parent's uuid.
     3) Otherwise, fallback to subject-based matching (strip "Re: ", "Fwd: ") within 7 days.
-    4) If that fails, generate a new thread ID.
+    4) If that fails, return this email's uuid as new thread ID.
 
     Args:
         email: Email object to find thread for
         resolver: Function that takes a message ID or subject key and returns Email or None
 
     Returns:
-        Thread ID string (existing or newly generated UUID)
+        Thread ID string (existing or this email's uuid)
     """
     # Step 1: Attempt in_reply_to / references
     # (Assuming `email.in_reply_to` is a single str, `email.references` a list of str)
@@ -32,7 +32,7 @@ def detect_thread(email: Email, resolver: Callable[[str], Optional[Email]]) -> s
     for ref in all_refs:
         parent = resolver(ref)
         if parent:
-            return getattr(parent, "thread_id", str(uuid.uuid4()))
+            return getattr(parent, "thread_id", parent.uuid)
 
     # Step 2: Fallback to subject-based approach
     # Simple normalisation: remove "Re: " and "Fwd: " ignoring case
@@ -54,7 +54,7 @@ def detect_thread(email: Email, resolver: Callable[[str], Optional[Email]]) -> s
         subject_key = f"subject:{norm_subj.lower()}|{start_date.isoformat()}|{end_date.isoformat()}"
         subject_parent = resolver(subject_key)
         if subject_parent:
-            return getattr(subject_parent, "thread_id", str(uuid.uuid4()))
+            return getattr(subject_parent, "thread_id", subject_parent.uuid)
 
-    # Step 3: Otherwise, generate new thread id
-    return str(uuid.uuid4())
+    # Step 3: Otherwise, return this email's uuid as new thread id
+    return email.uuid
