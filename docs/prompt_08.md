@@ -4,7 +4,7 @@
 
 **Task**
 1. Create package `postmark/cli/backfill.py` using `click`.
-2. Command `postmark-backfill [TGZ] --db-path --parquet-dir --dry-run`.
+2. Command `postmark-backfill [TGZ] --db-path --parquet-dir --dry-run`.  [TGZ] is `~/Downloads/All\ mail\ Including\ Spam\ and\ Trash-003.tgz`
 3. Inside, open the .tgz (use `tarfile`), iterate `.eml` entries, but **for now** just count them and print progress every 1000.
 
 **Tests**

@@ -12,7 +12,7 @@ def test_backfill_dry_run(tmp_path: Path) -> None:
     with gzip.open(gz_file, "wb") as f:
         for i in range(3):
             line = f"Header info for email {i}\n"
-            f.write(line.encode('utf-8'))
+            f.write(line.encode("utf-8"))
 
     runner = CliRunner()
     result = runner.invoke(main, [str(gz_file), "--dry-run"], catch_exceptions=False)
