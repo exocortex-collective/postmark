@@ -7,6 +7,13 @@ def create_connection(db_path: str) -> Connection:
     return sqlite3.connect(db_path)
 
 
+def create_db(db_path: str) -> Connection:
+    """Create or upgrade the database at db_path, returning the open connection."""
+    conn = create_connection(db_path)
+    upgrade(conn)
+    return conn
+
+
 def create_schema(conn: Connection) -> None:
     """Create the emails table (only) according to the spec."""
     conn.execute(
