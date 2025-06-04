@@ -6,6 +6,8 @@ from typing import List
 
 from Levenshtein import ratio as lev_ratio
 
+from postmark.email.parser import Email
+
 
 class BloomFilter:
     def __init__(self, capacity: int, error_rate: float) -> None:
@@ -47,7 +49,7 @@ def fuzzy_equal(a: str, b: str, threshold: float = 0.95) -> bool:
 
 
 def should_store(
-    email, bloom: BloomFilter, recent_bodies: list[str], threshold: float = 0.95
+    email: Email, bloom: BloomFilter, recent_bodies: list[str], threshold: float = 0.95
 ) -> bool:
     # If there's a message_id, we check Bloom first
     if email.message_id and (email.message_id in bloom):
