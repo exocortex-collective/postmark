@@ -4,7 +4,7 @@ import click
 
 
 @click.command()
-@click.argument("tgz", type=click.Path(exists=True))
+@click.argument("gz", type=click.Path(exists=True))
 @click.option(
     "--db-path", default="~/.postmark/emails.db", help="Path to the SQLite DB"
 )
@@ -19,10 +19,10 @@ import click
     default=False,
     help="Perform a dry run without side effects",
 )
-def main(tgz: str, db_path: str, parquet_dir: str, dry_run: bool) -> None:
+def main(gz: str, db_path: str, parquet_dir: str, dry_run: bool) -> None:
     # Read the specified gzip file in streaming mode
     count = 0
-    with gzip.open(tgz, "rb") as f:
+    with gzip.open(gz, "rb") as f:
         for i, _ in enumerate(f, start=1):
             count = i
             if count % 1000 == 0:
