@@ -15,8 +15,8 @@
 
 ### SQLite
 
-* [ ] **1.1** Implement `postmark.storage.sqlite.create_db()` & `upgrade()`.
-* [ ] **1.2** Add migration system and `schema_version` table.
+* [x] **1.1** Implement `postmark.storage.sqlite.create_db()` & `upgrade()`.
+* [x] **1.2** Add migration system and `schema_version` table.
 
 ### Parquet
 
