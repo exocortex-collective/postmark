@@ -1,7 +1,8 @@
-
 import datetime
+
 from postmark.email.parser import Email
 from postmark.email.threading import detect_thread
+
 
 def fake_resolver(key: str):
     """
@@ -36,6 +37,7 @@ def fake_resolver(key: str):
     # No match
     return None
 
+
 def test_detect_thread_in_reply_to() -> None:
     child_email = Email(
         uuid="child-uuid",
@@ -51,6 +53,7 @@ def test_detect_thread_in_reply_to() -> None:
     thread_id = detect_thread(child_email, fake_resolver)
     assert thread_id == "parent-uuid", "Should return parent's thread or parent's .uuid"
 
+
 def test_detect_thread_fallback_subject() -> None:
     fallback_email = Email(
         uuid="fallback-uuid",
@@ -64,6 +67,7 @@ def test_detect_thread_fallback_subject() -> None:
     # No references set, so it hits subject fallback
     thread_id = detect_thread(fallback_email, fake_resolver)
     assert thread_id == "sibling-uuid", "Should match sibling's .uuid by subject"
+
 
 def test_detect_thread_new() -> None:
     # 30 days difference => new thread
