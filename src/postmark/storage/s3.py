@@ -1,6 +1,7 @@
+from typing import Any
+
 import boto3
 from botocore.exceptions import ClientError
-from typing import Any
 
 
 class S3Client:
@@ -17,7 +18,7 @@ class S3Client:
         }
         if endpoint_url:
             kwargs["endpoint_url"] = endpoint_url
-            
+
         self.s3: Any = boto3.resource("s3", **kwargs)
         self.bucket_name: str = bucket_name
         self._create_bucket_if_missing()
