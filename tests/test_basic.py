@@ -3,12 +3,12 @@
 import postmark
 
 
-def test_version():
+def test_version() -> None:
     """Test that version is accessible."""
     assert postmark.__version__ == "0.0.0"
 
 
-def test_imports():
+def test_imports() -> None:
     """Test that main modules can be imported."""
     import postmark.cli
     import postmark.email
