@@ -1,11 +1,13 @@
-from pathlib import Path
-from postmark.email.parser import parse_eml, normalise_body
 import textwrap
+from pathlib import Path
+
+from postmark.email.parser import normalise_body, parse_eml
 
 
 def test_parse_plain_eml(tmp_path: Path) -> None:
     # Sample fixture EML
-    eml_content = textwrap.dedent("""\
+    eml_content = textwrap.dedent(
+        """\
     From: sender@example.com
     Date: Mon, 01 Jan 2024 10:00:00 +0000
     Message-Id: <test123@example.com>
@@ -13,7 +15,8 @@ def test_parse_plain_eml(tmp_path: Path) -> None:
     Content-Type: text/plain; charset="utf-8"
 
     Hello world
-    """)
+    """
+    )
     eml_file = tmp_path / "plain.eml"
     eml_file.write_text(eml_content, encoding="utf-8")
 
