@@ -28,7 +28,7 @@ jobs:
 
       - name: Lint and Test
         run: |
-          black --check .
-          isort --check-only .
-          mypy .
-          pytest --maxfail=1 --disable-warnings -q
+          uv run black --check .
+          uv run isort --check-only .
+          uv run mypy .
+          uv run pytest --maxfail=1 --disable-warnings -q
