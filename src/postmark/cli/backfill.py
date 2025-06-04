@@ -7,6 +7,7 @@ from typing import IO, Iterator, Optional
 
 import click
 import pyarrow as pa
+from dotenv import load_dotenv
 
 from postmark.email.dedup import BloomFilter, should_store
 from postmark.email.parser import Email, parse_eml
@@ -58,6 +59,9 @@ def _extract_eml_blobs(f: IO[bytes]) -> Iterator[bytes]:
         yield b"".join(current_email)
 
 
+load_dotenv()
+
+
 @click.command()
 @click.argument("gz", type=click.Path(exists=True))
 @click.option(
@@ -80,7 +84,37 @@ def _extract_eml_blobs(f: IO[bytes]) -> Iterator[bytes]:
     default=False,
     help="Stop on first error or push to dead-letter queue",
 )
-def main(gz: str, db_path: str, parquet_dir: str, dry_run: bool, fail_fast: bool = False) -> None:
+@click.option(
+    "--endpoint-url",
+    default=lambda: os.environ.get("AWS_S3_ENDPOINT", "http://localhost:9000"),
+    help="S3/MinIO endpoint URL; default from .env or http://localhost:9000",
+)
+@click.option(
+    "--aws-access-key-id",
+    default=lambda: os.environ.get("MINIO_ROOT_USER", "minioadmin"),
+    help="AWS/MinIO Access Key ID; default from .env or 'minioadmin'",
+)
+@click.option(
+    "--aws-secret-access-key",
+    default=lambda: os.environ.get("MINIO_ROOT_PASSWORD", "minioadmin"),
+    help="AWS/MinIO Secret Access Key; default from .env or 'minioadmin'",
+)
+@click.option(
+    "--bucket-name",
+    default=lambda: os.environ.get("S3_BUCKET", "postmark-attachments"),
+    help="S3 bucket name; default from .env or 'postmark-attachments'",
+)
+def main(
+    gz: str,
+    db_path: str,
+    parquet_dir: str,
+    dry_run: bool,
+    fail_fast: bool = False,
+    endpoint_url: str = "http://localhost:9000",
+    aws_access_key_id: str = "minioadmin",
+    aws_secret_access_key: str = "minioadmin",
+    bucket_name: str = "postmark-attachments",
+) -> None:
     # Normalize all paths
     gz = normalize_path(gz)
     db_path = normalize_path(db_path)
@@ -88,10 +122,10 @@ def main(gz: str, db_path: str, parquet_dir: str, dry_run: bool, fail_fast: bool
 
     # Initialize the S3 client and SQLite
     s3_client = S3Client(
-        endpoint_url=None,
-        aws_access_key_id="CHANGEME",
-        aws_secret_access_key="CHANGEME",
-        bucket_name="postmark-attachments",
+        endpoint_url=endpoint_url,
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key,
+        bucket_name=bucket_name,
     )
     conn = create_connection(db_path)
     create_schema(conn)
