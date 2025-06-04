@@ -1,4 +1,3 @@
-import boto3
 import pytest
 from moto import mock_aws
 
@@ -7,21 +6,11 @@ from postmark.storage.s3 import S3Client
 
 @mock_aws
 def test_put_and_get():
-    # Setup mock S3
-    endpoint_url = "http://localhost:9000"
-    client = boto3.resource(
-        "s3",
-        endpoint_url=endpoint_url,
-        aws_access_key_id="minioadmin",
-        aws_secret_access_key="minioadmin",
-    )
-    client.create_bucket(Bucket="test-bucket")
-
-    # Instantiate our wrapper
+    # Instantiate our wrapper - moto intercepts all S3 calls
     s3_client = S3Client(
-        endpoint_url=endpoint_url,
-        aws_access_key_id="minioadmin",
-        aws_secret_access_key="minioadmin",
+        endpoint_url=None,  # Not needed with moto
+        aws_access_key_id="test-key",
+        aws_secret_access_key="test-secret",
         bucket_name="test-bucket",
     )
 

@@ -6,17 +6,19 @@ from typing import Any
 class S3Client:
     def __init__(
         self,
-        endpoint_url: str,
+        endpoint_url: str | None,
         aws_access_key_id: str,
         aws_secret_access_key: str,
         bucket_name: str,
     ) -> None:
-        self.s3: Any = boto3.resource(
-            "s3",
-            endpoint_url=endpoint_url,
-            aws_access_key_id=aws_access_key_id,
-            aws_secret_access_key=aws_secret_access_key,
-        )
+        kwargs = {
+            "aws_access_key_id": aws_access_key_id,
+            "aws_secret_access_key": aws_secret_access_key,
+        }
+        if endpoint_url:
+            kwargs["endpoint_url"] = endpoint_url
+            
+        self.s3: Any = boto3.resource("s3", **kwargs)
         self.bucket_name: str = bucket_name
         self._create_bucket_if_missing()
 
