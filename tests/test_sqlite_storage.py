@@ -1,5 +1,7 @@
 import sqlite3
+
 import pytest
+
 from postmark.storage.sqlite import create_connection, upgrade
 
 
