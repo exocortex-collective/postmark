@@ -59,7 +59,6 @@ def _extract_eml_blobs(f: IO[bytes]) -> Iterator[bytes]:
         yield b"".join(current_email)
 
 
-load_dotenv()
 
 
 @click.command()
@@ -115,6 +114,8 @@ def main(
     aws_secret_access_key: str = "minioadmin",
     bucket_name: str = "postmark-attachments",
 ) -> None:
+    load_dotenv()
+    
     # Normalize all paths
     gz = normalize_path(gz)
     db_path = normalize_path(db_path)
