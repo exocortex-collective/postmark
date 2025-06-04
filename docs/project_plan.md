@@ -9,7 +9,7 @@ Below is a **three‑pass planning sequence** that begins with a full‑scale bl
 | **0 — Project Bootstrap** | Reproducible dev env & repo skeleton            | • `uv` virtual‑env & dependency pinning<br>• `pre‑commit`, `black`, `isort`, `mypy`, `pytest` scaffolding<br>• Architecture Decision Records (ADR) template & docs |
 | **1 — Storage Layer**     | Persist, read, and query data                   | • **SQLite** schema + migrations for `emails`, `attachments`, etc.<br>• **Parquet** writer/reader with ZSTD & yyyy‑mm partitioning<br>• **S3** attachment helper   |
 | **2 — Core Processing**   | Parse, dedup, thread, write                     | • RFC822 parser & normaliser<br>• Bloom‑filter & fuzzy‑match dedup<br>• Thread detection logic                                                                     |
-| **3 — Bulk Backfill CLI** | `postmark‑backfill` streams .tgz → DB + Parquet | • Batch ingest (1 k/tx, checkpoints)<br>• Dead‑letter queue                                                                                                        |
+| **3 — Bulk Backfill CLI** | `postmark‑backfill` streams .gz → DB + Parquet | • Batch ingest (1 k/tx, checkpoints)<br>• Dead‑letter queue                                                                                                        |
 | **4 — Sync Service**      | `postmark‑sync` keeps store ≤ 30 s behind Gmail | • Gmail API poll, IMAP fallback<br>• Overlap & retry logic                                                                                                         |
 | **5 — MCP Service**       | `postmark‑mcp` exposes query API                | • Search / get / thread endpoints<br>• Pagination, body‑truncation                                                                                                 |
 | **6 — Observability**     | Metrics, health, logs                           | • Prometheus counters/timers<br>• `/health`, `/ready`, structured JSON logs                                                                                        |
@@ -41,7 +41,7 @@ Below is a **three‑pass planning sequence** that begins with a full‑scale bl
 5. **Backfill CLI – skeleton**
 
    * 5.1 Argparse + loop
-   * 5.2 Read .tgz manifest
+   * 5.2 Read .gz
 6. **Backfill CLI – writers**
 
    * 6.1 SQLite batch insert
@@ -88,7 +88,7 @@ Each step is tuned for a single test‑driven development cycle (≈ 15–40�
 | **13** | Add batch SQLite insert (1000 rows) with transaction & rollback test                     | Rows persisted or none            |
 | **14** | Add Parquet write per 10 k emails (mock DF)                                              | Parquet file created              |
 | **15** | Attachments: detect, hash, upload dummy                                                  | S3 key pattern matches spec       |
-| **16** | Finish backfill happy‑path flow end‑to‑end (fixture .tgz)                                | Emails in DB & Parquet            |
+| **16** | Finish backfill happy‑path flow end‑to‑end (fixture .gz)                                 | Emails in DB & Parquet            |
 | **17** | `sync.gmail.poll()` returns list of new message\_ids (mocked)                            | Handles empty diff                |
 | **18** | IMAP fallback retrieves by UID                                                           | Integration test w/ green‑mail    |
 | **19** | `postmark‑sync` service loop with overlap window                                         | Duplicate avoidance test          |
