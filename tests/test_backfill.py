@@ -1,7 +1,10 @@
 import tarfile
 from pathlib import Path
+
 from click.testing import CliRunner
+
 from postmark.cli.backfill import main
+
 
 def test_backfill_dry_run(tmp_path: Path) -> None:
     # Create a test .tgz containing 3 dummy .eml files
