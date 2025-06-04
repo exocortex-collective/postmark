@@ -27,6 +27,7 @@ dev = [
     "pre-commit>=3.0.0",
     "types-requests",
     "types-boto3",
+    "moto>=4.0.0",
 ]
 
 [project.scripts]

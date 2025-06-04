@@ -20,13 +20,13 @@
 
 ### Parquet
 
-* [ ] **1.3** Create `postmark/storage/columnar.py` with `write_parquet` / `read_parquet`.
-* [ ] **1.4** Partition files by `YYYY‑MM` folder, ZSTD compression.
+* [x] **1.3** Create `postmark/storage/columnar.py` with `write_parquet` / `read_parquet`.
+* [x] **1.4** Partition files by `YYYY‑MM` folder, ZSTD compression.
 
 ### S3 Attachments
 
-* [ ] **1.5** Build S3 wrapper (`S3Client`) targeting local MinIO.
-* [ ] **1.6** Verify upload and retrieval in integration test.
+* [x] **1.5** Build S3 wrapper (`S3Client`) targeting local MinIO.
+* [x] **1.6** Verify upload and retrieval in integration test.
 
 ## Phase 2 — Email Model & Parsing
 
