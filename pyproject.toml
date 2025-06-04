@@ -1,7 +1,71 @@
 [project]
 name = "postmark"
 version = "0.1.0"
-description = "Add your description here"
+description = "A high-performance email datastore designed to ingest, store, and expose email data for automation tasks and AI agents"
 readme = "README.md"
-requires-python = ">=3.13"
-dependencies = []
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "sqlalchemy>=2.0.0",
+    "pyarrow>=12.0.0",
+    "boto3>=1.26.0",
+    "python-Levenshtein>=0.20.0",
+    "prometheus-client>=0.16.0",
+    "pydantic>=2.0.0",
+    "charset-normalizer>=3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.0.0",
+    "pre-commit>=3.0.0",
+    "types-requests",
+    "types-boto3",
+]
+
+[project.scripts]
+postmark-backfill = "postmark.cli.backfill:main"
+postmark-sync = "postmark.cli.sync:main"
+postmark-mcp = "postmark.cli.mcp:main"
+postmark-reindex = "postmark.cli.reindex:main"
+postmark-add-test = "postmark.cli.add_test:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.black]
+line-length = 88
+target-version = ['py310']
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
