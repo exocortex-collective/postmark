@@ -25,8 +25,17 @@ def fake_resolver(key: str) -> Optional[Email]:
             # or store it in a separate data structure
         )
     if key.startswith("subject:hello world|"):
-        # Pretend we find a match
-        return Email(
+        # E.g. key == "subject:hello world|2024-02-08T00:00:00|2024-02-22T00:00:00"
+        try:
+            _, subrange = key.split("|", 1)
+            start_str, end_str = subrange.split("|")
+            start_dt = datetime.datetime.fromisoformat(start_str)
+            end_dt = datetime.datetime.fromisoformat(end_str)
+        except ValueError:
+            return None  # Parsing error => no match
+
+        # The sibling is dated 2024-01-05
+        sibling_email = Email(
             uuid="sibling-uuid",
             message_id="<sibling@example.com>",
             date=datetime.datetime(2024, 1, 5),
@@ -35,6 +44,11 @@ def fake_resolver(key: str) -> Optional[Email]:
             body_text="Sibling body",
             body_html="",
         )
+        # Return sibling only if it's within [start_dt, end_dt]
+        if start_dt <= sibling_email.date <= end_dt:
+            return sibling_email
+        else:
+            return None
     # No match
     return None
 
