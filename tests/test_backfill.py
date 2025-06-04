@@ -40,10 +40,10 @@ def test_backfill_duplicates_and_attachments(tmp_path: Path):
     runner = CliRunner()
     result = runner.invoke(
         main,
-        [str(gz_file), "--dry-run"],  # Cambiar a quitar --dry-run si deseas probar side effects
+        [str(gz_file), "--dry-run"],  # Remove "--dry-run" to test side effects
         catch_exceptions=False,
     )
-    # Verificar que se procesaron los 3 y no hubo crash
+    # Verify that 3 emails were processed and no crash occurred
     assert "Processed 3" in result.output
     assert result.exit_code == 0
 
