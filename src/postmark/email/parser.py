@@ -6,6 +6,8 @@ from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path
 
+from bs4 import BeautifulSoup
+
 
 @dataclass
 class Email:
@@ -72,8 +74,8 @@ def parse_eml(path: Path) -> Email:
 
 
 def normalise_body(text: str) -> str:
-    # Remove HTML tags (super simplistic)
-    text_no_html = re.sub(r"<[^>]*>", "", text)
+    soup = BeautifulSoup(text, "html.parser")
+    text_no_html = soup.get_text()
     # Standardise whitespace & line endings
     lines = [ln.strip() for ln in text_no_html.splitlines()]
     # Remove lines starting with '> '

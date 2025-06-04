@@ -29,12 +29,14 @@ def test_parse_plain_eml(tmp_path: Path) -> None:
 
 def test_normalise_body() -> None:
     raw_body = """\
+    <div><b>Hello HTML</b></div>
     Hello
     > quoted line
     This is normal text
     > more quoted
     """
     norm = normalise_body(raw_body)
+    assert "HTML" in norm
     assert "> quoted" not in norm
     assert "Hello" in norm
     assert "This is normal text" in norm
