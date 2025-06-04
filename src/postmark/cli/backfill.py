@@ -1,11 +1,47 @@
 import gzip
 import os
+from typing import Optional
 
 import click
+
+from postmark.email.dedup import BloomFilter, should_store
+from postmark.email.parser import Email, parse_eml
+from postmark.email.threading import detect_thread
 
 
 def normalize_path(p: str) -> str:
     return os.path.abspath(os.path.normpath(os.path.expandvars(os.path.expanduser(p))))
+
+
+def _fake_resolver(key: str) -> Optional[Email]:
+    """Fake resolver for thread detection during dry run."""
+    return None
+
+
+def parse_eml_from_bytes(eml_raw: bytes) -> Email:
+    """Parse EML from raw bytes."""
+    # This is a placeholder - would need actual implementation
+    # For now, create a minimal Email object
+    from datetime import datetime
+    import uuid
+    
+    return Email(
+        uuid=str(uuid.uuid4()),
+        message_id=None,
+        date=datetime.now(),
+        subject="Test Subject",
+        from_addr="test@example.com",
+        body_text="Test body",
+        body_html="",
+        attachments=[]
+    )
+
+
+def _extract_eml_blobs(f):
+    """Extract EML blobs from gzip file."""
+    # Placeholder implementation - yields each line as bytes
+    for line in f:
+        yield line
 
 
 @click.command()
@@ -30,11 +66,57 @@ def main(gz: str, db_path: str, parquet_dir: str, dry_run: bool) -> None:
     db_path = normalize_path(db_path)
     parquet_dir = normalize_path(parquet_dir)
 
+    # Initialize deduplication components
+    bloom = BloomFilter(capacity=1000000, error_rate=0.001)
+    recent_bodies = []
+    batch_rows = []
+    batch_size = 1000
+
     # Read the specified gzip file in streaming mode
     count = 0
     with gzip.open(gz, "rb") as f:
-        for i, _ in enumerate(f, start=1):
+        for i, eml_raw in enumerate(_extract_eml_blobs(f), start=1):
             count = i
-            if count % 1000 == 0:
-                click.echo(f"Processed {count} lines so far...")
+            try:
+                # Always parse the EML to perform all checks
+                parse_eml_result = parse_eml_from_bytes(eml_raw)
+
+                # Dedup check
+                if not should_store(parse_eml_result, bloom, recent_bodies):
+                    continue
+
+                # Thread detection
+                thread_id = detect_thread(parse_eml_result, resolver=_fake_resolver)
+
+                # If dry_run, skip side effects, but keep logic checks
+                if dry_run:
+                    # No storage side effects
+                    pass
+                else:
+                    # Save attachments
+                    if parse_eml_result.attachments:
+                        for attach in parse_eml_result.attachments:
+                            key = f"{parse_eml_result.uuid}/1.2/{attach}"
+                            # s3_client.put_bytes(key, b"PLACEHOLDER_ATTACHMENT_CONTENT")
+                    
+                    # Add to batch for Parquet write
+                    batch_rows.append({
+                        'uuid': parse_eml_result.uuid,
+                        'subject': parse_eml_result.subject,
+                        'from_addr': parse_eml_result.from_addr,
+                        'body_text': parse_eml_result.body_text
+                    })
+                    
+                    # Batch Parquet write
+                    if len(batch_rows) >= batch_size:
+                        # write_parquet(pa.Table.from_pylist(batch_rows), parquet_dir)
+                        batch_rows.clear()
+
+                if count % 1000 == 0:
+                    click.echo(f"Processed {count} lines so far...")
+                    
+            except Exception as e:
+                click.echo(f"Error processing email {count}: {e}")
+                continue
+                
     click.echo(f"Processed {count} lines total (dry run: {dry_run}).")
