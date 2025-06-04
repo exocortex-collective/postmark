@@ -1,7 +1,8 @@
 from pathlib import Path
 
 import pyarrow as pa
-from postmark.storage.columnar import write_parquet, read_parquet
+
+from postmark.storage.columnar import read_parquet, write_parquet
 
 
 def test_write_and_read_parquet(tmp_path: Path) -> None:
