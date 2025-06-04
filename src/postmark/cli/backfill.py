@@ -1,5 +1,6 @@
 import gzip
 import os
+import tempfile
 from typing import IO, Iterator, Optional
 
 import click
@@ -19,22 +20,17 @@ def _fake_resolver(key: str) -> Optional[Email]:
 
 
 def parse_eml_from_bytes(eml_raw: bytes) -> Email:
-    """Parse EML from raw bytes."""
-    # This is a placeholder - would need actual implementation
-    # For now, create a minimal Email object
-    import uuid
-    from datetime import datetime
-
-    return Email(
-        uuid=str(uuid.uuid4()),
-        message_id=None,
-        date=datetime.now(),
-        subject="Test Subject",
-        from_addr="test@example.com",
-        body_text="Test body",
-        body_html="",
-        attachments=[],
-    )
+    """
+    Write the bytes to a temporary file and parse it with parser.parse_eml.
+    """
+    from pathlib import Path
+    with tempfile.NamedTemporaryFile(suffix=".eml", delete=False) as tf:
+        tf.write(eml_raw)
+        tf.flush()
+        tmp_path = Path(tf.name)
+    parsed = parse_eml(tmp_path)
+    tmp_path.unlink(missing_ok=True)
+    return parsed
 
 
 def _extract_eml_blobs(f: IO[bytes]) -> Iterator[bytes]:
