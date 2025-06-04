@@ -1,8 +1,9 @@
-from typing import List
-from dataclasses import dataclass
 import math
 import random
 import string
+from dataclasses import dataclass
+from typing import List
+
 from Levenshtein import ratio as lev_ratio
 
 
@@ -20,9 +21,11 @@ class BloomFilter:
     def _hashes(self, item: str) -> List[int]:
         # Generate self.num_hashes different integer hashes
         out = []
-        random.seed(0)  # We only use seed to change salt, must be consistent for all items
+        random.seed(
+            0
+        )  # We only use seed to change salt, must be consistent for all items
         for i in range(self.num_hashes):
-            salt = ''.join(random.choices(string.ascii_letters, k=5))
+            salt = "".join(random.choices(string.ascii_letters, k=5))
             h = abs(hash(item + salt)) % self.size
             out.append(h)
         return out
@@ -43,7 +46,9 @@ def fuzzy_equal(a: str, b: str, threshold: float = 0.95) -> bool:
     return lev_ratio(a, b) >= threshold
 
 
-def should_store(email, bloom: BloomFilter, recent_bodies: list[str], threshold: float = 0.95) -> bool:
+def should_store(
+    email, bloom: BloomFilter, recent_bodies: list[str], threshold: float = 0.95
+) -> bool:
     # If there's a message_id, we check Bloom first
     if email.message_id and (email.message_id in bloom):
         return False
