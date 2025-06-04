@@ -45,10 +45,10 @@ def fake_resolver(key: str) -> Optional[Email]:
             body_html="",
         )
         # Return sibling only if it's within [start_dt, end_dt]
-        if start_dt <= sibling_email.date <= end_dt:
+        date = sibling_email.date
+        if date is not None and start_dt <= date <= end_dt:
             return sibling_email
-        else:
-            return None
+        return None
     # No match
     return None
 
