@@ -48,8 +48,7 @@ def parse_eml(path: Path) -> Email:
             payload = part.get_payload(decode=True)
             if isinstance(payload, bytes):
                 text_part = payload.decode(
-                    part.get_content_charset() or "utf-8",
-                    errors="replace"
+                    part.get_content_charset() or "utf-8", errors="replace"
                 )
             else:
                 text_part = str(payload or "")
