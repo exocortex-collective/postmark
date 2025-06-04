@@ -126,8 +126,8 @@ def main(gz: str, db_path: str, parquet_dir: str, dry_run: bool) -> None:
                         # write_parquet(pa.Table.from_pylist(batch_rows), parquet_dir)
                         batch_rows.clear()
 
-                if count % 1000 == 0:
-                    click.echo(f"Processed {count} lines so far...")
+                if count % 100 == 0:
+                    click.echo(f"Processed {count} emails so far...")
 
             except Exception as e:
                 click.echo(f"Error processing email {count}: {e}")
