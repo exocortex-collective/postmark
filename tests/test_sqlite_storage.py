@@ -1,11 +1,12 @@
 import sqlite3
+from pathlib import Path
 
 import pytest
 
 from postmark.storage.sqlite import create_connection, upgrade
 
 
-def test_schema_created(tmp_path) -> None:
+def test_schema_created(tmp_path: Path) -> None:
     """Ensure 'emails' table and schema_version=1 are created."""
     db_path = tmp_path / "test.db"
     conn = create_connection(str(db_path))
