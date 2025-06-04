@@ -5,7 +5,7 @@ from postmark.storage.s3 import S3Client
 
 
 @mock_aws
-def test_put_and_get():
+def test_put_and_get() -> None:
     # Instantiate our wrapper - moto intercepts all S3 calls
     s3_client = S3Client(
         endpoint_url=None,  # Not needed with moto
