@@ -6,10 +6,10 @@
 
 ## Phase 0 — Project Bootstrap
 
-* [ ] **0.1** Create `pyproject.toml` with installable `postmark` package structure.
-* [ ] **0.2** Add dev dependencies and lock file via `uv`.
-* [ ] **0.3** Configure `.pre‑commit‑config.yaml` (black, isort, mypy, pytest).
-* [ ] **0.4** Set up initial GitHub Actions CI skeleton.
+* [x] **0.1** Create `pyproject.toml` with installable `postmark` package structure.
+* [x] **0.2** Add dev dependencies and lock file via `uv`.
+* [x] **0.3** Configure `.pre‑commit‑config.yaml` (black, isort, mypy, pytest).
+* [x] **0.4** Set up initial GitHub Actions CI skeleton.
 
 ## Phase 1 — Storage Layer Foundation
 
