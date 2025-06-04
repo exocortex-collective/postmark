@@ -53,3 +53,51 @@ def upgrade(conn: Connection) -> None:
         conn.execute("INSERT INTO schema_version(version) VALUES (1);")
     # In a real system, you might handle subsequent versions here.
     conn.commit()
+
+
+def insert_email(conn: Connection, email_obj, thread_id: str) -> None:
+    """
+    Insert an Email record into the 'emails' table.
+    """
+    sql = """
+        INSERT INTO emails (uuid, message_id, date, subject, from_addr, schema_version, parquet_file, parquet_row)
+        VALUES (?, ?, ?, ?, ?, 1, 'pending', -1)
+    """
+    date_val = 0
+    if email_obj.date is not None:
+        date_val = int(email_obj.date.timestamp())
+    conn.execute(
+        sql,
+        (
+            email_obj.uuid,
+            email_obj.message_id,
+            date_val,
+            email_obj.subject or "",
+            email_obj.from_addr or "",
+        ),
+    )
+    conn.commit()
+
+
+def write_dead_letter(conn: Connection, source_file: str, offset: int, ex: Exception) -> None:
+    """
+    Write a dead letter entry to 'dead_letter_queue'.
+    """
+    sql = """
+        CREATE TABLE IF NOT EXISTS dead_letter_queue (
+          id INTEGER PRIMARY KEY,
+          source_file TEXT NOT NULL,
+          file_offset INTEGER NOT NULL,
+          error_type TEXT NOT NULL,
+          error_message TEXT,
+          traceback TEXT,
+          created_at INTEGER NOT NULL
+        );
+    """
+    conn.execute(sql)
+    sql2 = """
+        INSERT INTO dead_letter_queue (source_file, file_offset, error_type, error_message, traceback, created_at)
+        VALUES (?, ?, ?, ?, ?, strftime('%s','now'))
+    """
+    conn.execute(sql2, (source_file, offset, type(ex).__name__, str(ex), ""))
+    conn.commit()

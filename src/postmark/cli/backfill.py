@@ -12,7 +12,7 @@ from postmark.email.dedup import BloomFilter, should_store
 from postmark.email.parser import Email, parse_eml
 from postmark.email.threading import detect_thread
 from postmark.storage.s3 import S3Client
-from postmark.storage.sqlite import create_connection, create_schema
+from postmark.storage.sqlite import create_connection, create_schema, insert_email, write_dead_letter
 from postmark.storage.columnar import write_parquet
 
 
@@ -130,7 +130,7 @@ def main(gz: str, db_path: str, parquet_dir: str, dry_run: bool, fail_fast: bool
                             s3_client.put_bytes(key, b"PLACEHOLDER_ATTACHMENT_CONTENT")
 
                     # Insert into SQLite
-                    _insert_into_sqlite(conn, parse_eml_result, thread_id)
+                    insert_email(conn, parse_eml_result, thread_id)
 
                     # Add to batch for Parquet write
                     batch_rows.append(
@@ -154,7 +154,7 @@ def main(gz: str, db_path: str, parquet_dir: str, dry_run: bool, fail_fast: bool
                 if fail_fast:
                     raise
                 else:
-                    _write_dead_letter(conn, gz, i, e)
+                    write_dead_letter(conn, gz, i, e)
                 click.echo(f"Error processing email {count}: {e}")
                 continue
 
@@ -166,33 +166,3 @@ def main(gz: str, db_path: str, parquet_dir: str, dry_run: bool, fail_fast: bool
     click.echo(f"Processed {count} lines total (dry run: {dry_run}).")
 
 
-def _insert_into_sqlite(conn, email_obj: Email, thread_id: str) -> None:
-    sql = """
-        INSERT INTO emails (uuid, message_id, date, subject, from_addr, schema_version, parquet_file, parquet_row)
-        VALUES (?, ?, ?, ?, ?, 1, 'pending', -1)
-    """
-    date_val = int(email_obj.date.timestamp()) if email_obj.date else 0
-    conn.execute(sql, (email_obj.uuid, email_obj.message_id, date_val, email_obj.subject or "", email_obj.from_addr or ""))
-    conn.commit()
-
-
-def _write_dead_letter(conn, source_file: str, offset: int, ex: Exception) -> None:
-    sql = """
-        CREATE TABLE IF NOT EXISTS dead_letter_queue (
-          id INTEGER PRIMARY KEY,
-          source_file TEXT NOT NULL,
-          file_offset INTEGER NOT NULL,
-          error_type TEXT NOT NULL,
-          error_message TEXT,
-          traceback TEXT,
-          created_at INTEGER NOT NULL
-        );
-    """
-    conn.execute(sql)
-
-    sql2 = """
-        INSERT INTO dead_letter_queue (source_file, file_offset, error_type, error_message, traceback, created_at)
-        VALUES (?, ?, ?, ?, ?, strftime('%s','now'))
-    """
-    conn.execute(sql2, (source_file, offset, type(ex).__name__, str(ex), ""))
-    conn.commit()
