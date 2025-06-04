@@ -1,10 +1,11 @@
 import os
 import tempfile
 from pathlib import Path
-from typing import IO, Iterator, Optional
+from sqlite3 import Connection
+from typing import IO, Any, Iterator, Optional
 
 import click
-import indexed_gzip as igz  # type: ignore[import-untyped]
+import indexed_gzip as igz
 import pyarrow as pa
 from dotenv import load_dotenv
 
@@ -64,53 +65,116 @@ def _extract_eml_blobs(f: IO[bytes]) -> Iterator[bytes]:
         yield b"".join(current_email)
 
 
-@click.command()
-@click.argument("gz", type=click.Path(exists=True))
+def process_email(
+    eml_raw: bytes,
+    i: int,
+    bloom: BloomFilter,
+    recent_bodies: list[str],
+    s3_client: S3Client,
+    conn: Connection,
+    parquet_dir: str,
+    batch_rows: list[dict[str, Any]],
+    dry_run: bool,
+    fail_fast: bool,
+    gz: str,
+    batch_size: int,
+) -> Optional[Exception]:
+    try:
+        parse_eml_result = parse_eml_from_bytes(eml_raw)
+        if not should_store(parse_eml_result, bloom, recent_bodies):
+            return None
+        thread_id = detect_thread(parse_eml_result, resolver=_fake_resolver)
+        if dry_run:
+            pass
+        else:
+            if parse_eml_result.attachments:
+                for attach in parse_eml_result.attachments:
+                    key = f"{parse_eml_result.uuid}/1.2/{attach}"
+                    s3_client.put_bytes(key, b"PLACEHOLDER_ATTACHMENT_CONTENT")
+            insert_email(conn, parse_eml_result, thread_id)
+            batch_rows.append(
+                {
+                    "uuid": parse_eml_result.uuid,
+                    "subject": parse_eml_result.subject,
+                    "from_addr": parse_eml_result.from_addr,
+                    "body_text": parse_eml_result.body_text,
+                }
+            )
+            if len(batch_rows) >= batch_size:
+                out_path = Path(parquet_dir) / "emails.parquet"
+                write_parquet(
+                    pa.Table.from_pylist(batch_rows),
+                    out_path,
+                )
+                batch_rows.clear()
+        return None
+    except Exception as e:
+        if fail_fast:
+            raise
+        else:
+            write_dead_letter(conn, gz, i, e)
+        return e
+
+
+@click.command()  # type: ignore[misc]
+@click.argument("gz", type=click.Path(exists=True), required=True)  # type: ignore[misc]
 @click.option(
-    "--db-path", default="~/.postmark/emails.db", help="Path to the SQLite DB"
-)
+    "--db-path",
+    default="~/.postmark/emails.db",
+    help="Path to the SQLite DB",
+    type=str,
+    required=True,
+)  # type: ignore[misc]
 @click.option(
     "--parquet-dir",
     default="~/.postmark/parquet",
     help="Directory to store Parquet files",
-)
+    type=str,
+    required=True,
+)  # type: ignore[misc]
 @click.option(
     "--dry-run",
     is_flag=True,
     default=False,
     help="Perform a dry run without side effects",
-)
+    type=bool,
+)  # type: ignore[misc]
 @click.option(
     "--fail-fast",
     is_flag=True,
     default=False,
     help="Stop on first error or push to dead-letter queue",
-)
+    type=bool,
+)  # type: ignore[misc]
 @click.option(
     "--endpoint-url",
     default=lambda: os.environ.get("AWS_S3_ENDPOINT", "http://localhost:9000"),
     help="S3/MinIO endpoint URL; default from .env or http://localhost:9000",
-)
+    type=str,
+)  # type: ignore[misc]
 @click.option(
     "--aws-access-key-id",
     default=lambda: os.environ.get("MINIO_ROOT_USER", "minioadmin"),
     help="AWS/MinIO Access Key ID; default from .env or 'minioadmin'",
-)
+    type=str,
+)  # type: ignore[misc]
 @click.option(
     "--aws-secret-access-key",
     default=lambda: os.environ.get("MINIO_ROOT_PASSWORD", "minioadmin"),
     help="AWS/MinIO Secret Access Key; default from .env or 'minioadmin'",
-)
+    type=str,
+)  # type: ignore[misc]
 @click.option(
     "--bucket-name",
     default=lambda: os.environ.get("S3_BUCKET", "postmark-attachments"),
     help="S3 bucket name; default from .env or 'postmark-attachments'",
-)
+    type=str,
+)  # type: ignore[misc]
 def main(
     gz: str,
     db_path: str,
     parquet_dir: str,
-    dry_run: bool,
+    dry_run: bool = False,
     fail_fast: bool = False,
     endpoint_url: str = "http://localhost:9000",
     aws_access_key_id: str = "minioadmin",
@@ -141,7 +205,7 @@ def main(
     # Initialize deduplication components
     bloom = BloomFilter(capacity=1000000, error_rate=0.001)
     recent_bodies: list[str] = []
-    batch_rows = []
+    batch_rows: list[dict[str, Any]] = []
     batch_size = 1000
 
     # Read the specified gzip file in streaming mode
@@ -149,60 +213,25 @@ def main(
     with igz.IndexedGzipFile(gz) as f:
         for i, eml_raw in enumerate(_extract_eml_blobs(f), start=1):
             count = i
-            try:
-                # Always parse the EML to perform all checks
-                parse_eml_result = parse_eml_from_bytes(eml_raw)
-
-                # Dedup check
-                if not should_store(parse_eml_result, bloom, recent_bodies):
-                    continue
-
-                # Thread detection
-                thread_id = detect_thread(parse_eml_result, resolver=_fake_resolver)
-
-                # If dry_run, skip side effects, but keep logic checks
-                if dry_run:
-                    # No storage side effects
-                    pass
-                else:
-                    # Save attachments
-                    if parse_eml_result.attachments:
-                        for attach in parse_eml_result.attachments:
-                            key = f"{parse_eml_result.uuid}/1.2/{attach}"
-                            s3_client.put_bytes(key, b"PLACEHOLDER_ATTACHMENT_CONTENT")
-
-                    # Insert into SQLite
-                    insert_email(conn, parse_eml_result, thread_id)
-
-                    # Add to batch for Parquet write
-                    batch_rows.append(
-                        {
-                            "uuid": parse_eml_result.uuid,
-                            "subject": parse_eml_result.subject,
-                            "from_addr": parse_eml_result.from_addr,
-                            "body_text": parse_eml_result.body_text,
-                        }
-                    )
-
-                    # Batch Parquet write
-                    if len(batch_rows) >= batch_size:
-                        out_path = Path(parquet_dir) / "emails.parquet"
-                        write_parquet(
-                            pa.Table.from_pylist(batch_rows),
-                            out_path,
-                        )
-                        batch_rows.clear()
-
-                if count % 1000 == 0:
-                    click.echo(f"Processed {count} emails so far...")
-
-            except Exception as e:
-                if fail_fast:
-                    raise
-                else:
-                    write_dead_letter(conn, gz, i, e)
-                click.echo(f"Error processing email {count}: {e}")
+            err = process_email(
+                eml_raw,
+                i,
+                bloom,
+                recent_bodies,
+                s3_client,
+                conn,
+                parquet_dir,
+                batch_rows,
+                dry_run,
+                fail_fast,
+                gz,
+                batch_size,
+            )
+            if err:
+                click.echo(f"Error processing email {count}: {err}")
                 continue
+            if count % 1000 == 0:
+                click.echo(f"Processed {count} emails so far...")
 
     # Write any remaining batch
     if not dry_run and batch_rows:

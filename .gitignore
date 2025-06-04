@@ -9,3 +9,6 @@ wheels/
 # Virtual environments
 .venv
 .aider*
+
+# Docker cruft
+minio-data/
