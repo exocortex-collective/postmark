@@ -1,11 +1,11 @@
 import boto3
 import pytest
-from moto import mock_s3
+from moto import mock_aws
 
 from postmark.storage.s3 import S3Client
 
 
-@mock_s3
+@mock_aws
 def test_put_and_get():
     # Setup mock S3
     endpoint_url = "http://localhost:9000"

@@ -1,5 +1,6 @@
 import boto3
 from botocore.exceptions import ClientError
+from typing import Any
 
 
 class S3Client:
@@ -9,14 +10,14 @@ class S3Client:
         aws_access_key_id: str,
         aws_secret_access_key: str,
         bucket_name: str,
-    ):
-        self.s3 = boto3.resource(
+    ) -> None:
+        self.s3: Any = boto3.resource(
             "s3",
             endpoint_url=endpoint_url,
             aws_access_key_id=aws_access_key_id,
             aws_secret_access_key=aws_secret_access_key,
         )
-        self.bucket_name = bucket_name
+        self.bucket_name: str = bucket_name
         self._create_bucket_if_missing()
 
     def _create_bucket_if_missing(self) -> None:
