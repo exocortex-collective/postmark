@@ -21,7 +21,7 @@ class Email:
 
 def parse_eml(path: Path) -> Email:
     with path.open("rb") as f:
-        msg = BytesParser(policy=default).parse(f)
+        msg = BytesParser().parse(f)
     # Basic fields
     eml_uuid = str(uuid.uuid4())
     message_id = msg["Message-Id"]
@@ -43,10 +43,14 @@ def parse_eml(path: Path) -> Email:
     for part in msg.walk():
         ctype = part.get_content_type()
         if ctype in ["text/plain", "text/html"]:
-            payload = part.get_payload(decode=True) or b""
-            text_part = payload.decode(
-                part.get_content_charset() or "utf-8", errors="replace"
-            )
+            payload = part.get_payload(decode=True)
+            if isinstance(payload, bytes):
+                text_part = payload.decode(
+                    part.get_content_charset() or "utf-8",
+                    errors="replace"
+                )
+            else:
+                text_part = str(payload or "")
             if ctype == "text/plain":
                 body_text.append(text_part)
             else:
