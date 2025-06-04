@@ -16,7 +16,7 @@ Enhance `postmark-backfill`:
 4. Implement `--fail-fast` to stop on first error or push to dead‑letter queue.
 
 **Tests**
-- Fixture .tgz with duplicates → only 2 stored.
+- Fixture .gz with duplicates → only 2 stored.
 - Assert attachments uploaded to MinIO with key `{uuid}/{mime_path}/filename`.
 
 Write the code and the tests.

@@ -1,6 +1,6 @@
 [project]
 name = "postmark"
-version = "0.1.0"
+version = "0.1.1"
 description = "A high-performance email datastore designed to ingest, store, and expose email data for automation tasks and AI agents"
 readme = "README.md"
 requires-python = ">=3.10"
