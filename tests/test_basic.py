@@ -5,7 +5,7 @@ import postmark
 
 def test_version() -> None:
     """Test that version is accessible."""
-    assert postmark.__version__ == "0.0.0"
+    assert postmark.__version__ == "0.1.0"
 
 
 def test_imports() -> None:
