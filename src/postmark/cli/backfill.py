@@ -1,4 +1,4 @@
-import gzip
+import indexed_gzip as igz
 import os
 import tempfile
 import sys
@@ -6,10 +6,14 @@ from pprint import pprint
 from typing import IO, Iterator, Optional
 
 import click
+import pyarrow as pa
 
 from postmark.email.dedup import BloomFilter, should_store
 from postmark.email.parser import Email, parse_eml
 from postmark.email.threading import detect_thread
+from postmark.storage.s3 import S3Client
+from postmark.storage.sqlite import create_connection, create_schema
+from postmark.storage.columnar import write_parquet
 
 
 def normalize_path(p: str) -> str:
@@ -70,11 +74,27 @@ def _extract_eml_blobs(f: IO[bytes]) -> Iterator[bytes]:
     default=False,
     help="Perform a dry run without side effects",
 )
-def main(gz: str, db_path: str, parquet_dir: str, dry_run: bool) -> None:
+@click.option(
+    "--fail-fast",
+    is_flag=True,
+    default=False,
+    help="Stop on first error or push to dead-letter queue",
+)
+def main(gz: str, db_path: str, parquet_dir: str, dry_run: bool, fail_fast: bool = False) -> None:
     # Normalize all paths
     gz = normalize_path(gz)
     db_path = normalize_path(db_path)
     parquet_dir = normalize_path(parquet_dir)
+
+    # S3 y SQLite
+    s3_client = S3Client(
+        endpoint_url=None,
+        aws_access_key_id="CHANGEME",
+        aws_secret_access_key="CHANGEME",
+        bucket_name="postmark-attachments",
+    )
+    conn = create_connection(db_path)
+    create_schema(conn)
 
     # Initialize deduplication components
     bloom = BloomFilter(capacity=1000000, error_rate=0.001)
@@ -84,7 +104,7 @@ def main(gz: str, db_path: str, parquet_dir: str, dry_run: bool) -> None:
 
     # Read the specified gzip file in streaming mode
     count = 0
-    with gzip.open(gz, "rb") as f:
+    with igz.IndexedGzipFile(gz) as f:
         for i, eml_raw in enumerate(_extract_eml_blobs(f), start=1):
             count = i
             try:
@@ -107,7 +127,10 @@ def main(gz: str, db_path: str, parquet_dir: str, dry_run: bool) -> None:
                     if parse_eml_result.attachments:
                         for attach in parse_eml_result.attachments:
                             key = f"{parse_eml_result.uuid}/1.2/{attach}"
-                            # s3_client.put_bytes(key, b"PLACEHOLDER_ATTACHMENT_CONTENT")
+                            s3_client.put_bytes(key, b"PLACEHOLDER_ATTACHMENT_CONTENT")
+
+                    # Insert into SQLite
+                    _insert_into_sqlite(conn, parse_eml_result, thread_id)
 
                     # Add to batch for Parquet write
                     batch_rows.append(
@@ -121,14 +144,55 @@ def main(gz: str, db_path: str, parquet_dir: str, dry_run: bool) -> None:
 
                     # Batch Parquet write
                     if len(batch_rows) >= batch_size:
-                        # write_parquet(pa.Table.from_pylist(batch_rows), parquet_dir)
+                        write_parquet(pa.Table.from_pylist(batch_rows), os.path.join(parquet_dir, "emails.parquet"))
                         batch_rows.clear()
 
                 if count % 1000 == 0:
                     click.echo(f"Processed {count} emails so far...")
 
             except Exception as e:
+                if fail_fast:
+                    raise
+                else:
+                    _write_dead_letter(conn, gz, i, e)
                 click.echo(f"Error processing email {count}: {e}")
                 continue
 
+    # Write any remaining batch
+    if not dry_run and batch_rows:
+        write_parquet(pa.Table.from_pylist(batch_rows), os.path.join(parquet_dir, "emails.parquet"))
+        batch_rows.clear()
+
     click.echo(f"Processed {count} lines total (dry run: {dry_run}).")
+
+
+def _insert_into_sqlite(conn, email_obj: Email, thread_id: str) -> None:
+    sql = """
+        INSERT INTO emails (uuid, message_id, date, subject, from_addr, schema_version, parquet_file, parquet_row)
+        VALUES (?, ?, ?, ?, ?, 1, 'pending', -1)
+    """
+    date_val = int(email_obj.date.timestamp()) if email_obj.date else 0
+    conn.execute(sql, (email_obj.uuid, email_obj.message_id, date_val, email_obj.subject or "", email_obj.from_addr or ""))
+    conn.commit()
+
+
+def _write_dead_letter(conn, source_file: str, offset: int, ex: Exception) -> None:
+    sql = """
+        CREATE TABLE IF NOT EXISTS dead_letter_queue (
+          id INTEGER PRIMARY KEY,
+          source_file TEXT NOT NULL,
+          file_offset INTEGER NOT NULL,
+          error_type TEXT NOT NULL,
+          error_message TEXT,
+          traceback TEXT,
+          created_at INTEGER NOT NULL
+        );
+    """
+    conn.execute(sql)
+
+    sql2 = """
+        INSERT INTO dead_letter_queue (source_file, file_offset, error_type, error_message, traceback, created_at)
+        VALUES (?, ?, ?, ?, ?, strftime('%s','now'))
+    """
+    conn.execute(sql2, (source_file, offset, type(ex).__name__, str(ex), ""))
+    conn.commit()
