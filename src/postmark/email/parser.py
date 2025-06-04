@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 class Email:
     uuid: str
     message_id: str | None
-    date: datetime
+    date: datetime | None
     subject: str
     from_addr: str
     body_text: str
@@ -39,7 +39,7 @@ def parse_eml(path: Path) -> Email:
     parsed_dt = None
     if date_str:
         parsed_dt = parsedate_to_datetime(date_str)
-    dt = parsed_dt if parsed_dt else datetime.utcnow()
+    dt = parsed_dt
 
     # Extract body text & HTML
     body_text = []
