@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import IO, Iterator, Optional
 
 import click
-import indexed_gzip as igz  # type: ignore[import]
+import indexed_gzip as igz  # type: ignore[import-untyped]
 import pyarrow as pa
 from dotenv import load_dotenv
 
