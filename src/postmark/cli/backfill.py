@@ -1,6 +1,8 @@
 import gzip
 import os
 import tempfile
+import sys
+from pprint import pprint
 from typing import IO, Iterator, Optional
 
 import click
@@ -122,7 +124,7 @@ def main(gz: str, db_path: str, parquet_dir: str, dry_run: bool) -> None:
                         # write_parquet(pa.Table.from_pylist(batch_rows), parquet_dir)
                         batch_rows.clear()
 
-                if count % 100 == 0:
+                if count % 1000 == 0:
                     click.echo(f"Processed {count} emails so far...")
 
             except Exception as e:
