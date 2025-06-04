@@ -14,7 +14,7 @@ def test_package_imports():
     import postmark.email
     import postmark.sync
     import postmark.cli
-    
+
     # Basic smoke test - modules should import without error
     assert postmark.storage is not None
     assert postmark.email is not None
