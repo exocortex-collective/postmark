@@ -1,6 +1,6 @@
 import gzip
 import os
-from typing import Optional
+from typing import IO, Iterator, Optional
 
 import click
 
@@ -37,7 +37,7 @@ def parse_eml_from_bytes(eml_raw: bytes) -> Email:
     )
 
 
-def _extract_eml_blobs(f):
+def _extract_eml_blobs(f: IO[bytes]) -> Iterator[bytes]:
     """Extract EML blobs from gzip file."""
     # Placeholder implementation - yields each line as bytes
     for line in f:
@@ -68,7 +68,7 @@ def main(gz: str, db_path: str, parquet_dir: str, dry_run: bool) -> None:
 
     # Initialize deduplication components
     bloom = BloomFilter(capacity=1000000, error_rate=0.001)
-    recent_bodies = []
+    recent_bodies: list[str] = []
     batch_rows = []
     batch_size = 1000
 
