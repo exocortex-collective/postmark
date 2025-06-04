@@ -12,14 +12,12 @@ class S3Client:
         aws_secret_access_key: str,
         bucket_name: str,
     ) -> None:
-        kwargs = {
-            "aws_access_key_id": aws_access_key_id,
-            "aws_secret_access_key": aws_secret_access_key,
-        }
-        if endpoint_url:
-            kwargs["endpoint_url"] = endpoint_url
-
-        self.s3: Any = boto3.resource("s3", **kwargs)
+        self.s3 = boto3.resource(
+            "s3",
+            endpoint_url=endpoint_url,
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=aws_secret_access_key,
+        )
         self.bucket_name: str = bucket_name
         self._create_bucket_if_missing()
 
@@ -35,7 +33,9 @@ class S3Client:
 
     def get_bytes(self, key: str) -> bytes:
         obj = self.s3.Object(self.bucket_name, key)
-        return obj.get()["Body"].read()
+        response = obj.get()
+        data: bytes = response["Body"].read()
+        return data
 
     def list_keys(self, prefix: str = "") -> list[str]:
         bucket = self.s3.Bucket(self.bucket_name)
