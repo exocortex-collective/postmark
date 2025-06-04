@@ -79,7 +79,9 @@ def insert_email(conn: Connection, email_obj, thread_id: str) -> None:
     conn.commit()
 
 
-def write_dead_letter(conn: Connection, source_file: str, offset: int, ex: Exception) -> None:
+def write_dead_letter(
+    conn: Connection, source_file: str, offset: int, ex: Exception
+) -> None:
     """
     Write a dead letter entry to 'dead_letter_queue'.
     """

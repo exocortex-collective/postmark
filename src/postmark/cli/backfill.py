@@ -1,20 +1,23 @@
-import indexed_gzip as igz
 import os
 import tempfile
-import sys
-from pprint import pprint
 from typing import IO, Iterator, Optional
 
 import click
+import indexed_gzip as igz
 import pyarrow as pa
 from dotenv import load_dotenv
 
 from postmark.email.dedup import BloomFilter, should_store
 from postmark.email.parser import Email, parse_eml
 from postmark.email.threading import detect_thread
-from postmark.storage.s3 import S3Client
-from postmark.storage.sqlite import create_connection, create_schema, insert_email, write_dead_letter
 from postmark.storage.columnar import write_parquet
+from postmark.storage.s3 import S3Client
+from postmark.storage.sqlite import (
+    create_connection,
+    create_schema,
+    insert_email,
+    write_dead_letter,
+)
 
 
 def normalize_path(p: str) -> str:
@@ -31,6 +34,7 @@ def parse_eml_from_bytes(eml_raw: bytes) -> Email:
     Write the bytes to a temporary file and parse it with parser.parse_eml.
     """
     from pathlib import Path
+
     with tempfile.NamedTemporaryFile(suffix=".eml", delete=False) as tf:
         tf.write(eml_raw)
         tf.flush()
@@ -57,8 +61,6 @@ def _extract_eml_blobs(f: IO[bytes]) -> Iterator[bytes]:
     # Yield any remaining lines after the final boundary
     if current_email:
         yield b"".join(current_email)
-
-
 
 
 @click.command()
@@ -115,7 +117,7 @@ def main(
     bucket_name: str = "postmark-attachments",
 ) -> None:
     load_dotenv()
-    
+
     # Normalize all paths
     gz = normalize_path(gz)
     db_path = normalize_path(db_path)
@@ -179,7 +181,10 @@ def main(
 
                     # Batch Parquet write
                     if len(batch_rows) >= batch_size:
-                        write_parquet(pa.Table.from_pylist(batch_rows), os.path.join(parquet_dir, "emails.parquet"))
+                        write_parquet(
+                            pa.Table.from_pylist(batch_rows),
+                            os.path.join(parquet_dir, "emails.parquet"),
+                        )
                         batch_rows.clear()
 
                 if count % 1000 == 0:
@@ -195,9 +200,10 @@ def main(
 
     # Write any remaining batch
     if not dry_run and batch_rows:
-        write_parquet(pa.Table.from_pylist(batch_rows), os.path.join(parquet_dir, "emails.parquet"))
+        write_parquet(
+            pa.Table.from_pylist(batch_rows),
+            os.path.join(parquet_dir, "emails.parquet"),
+        )
         batch_rows.clear()
 
     click.echo(f"Processed {count} lines total (dry run: {dry_run}).")
-
-

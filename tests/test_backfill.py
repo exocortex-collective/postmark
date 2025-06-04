@@ -27,8 +27,10 @@ def test_backfill_duplicates_and_attachments(tmp_path: Path):
     Creates a .gz with two duplicated EMLs and one unique EML;
     verifies that only two are stored and uploads attachments to S3 with the correct key.
     """
-    from click.testing import CliRunner
     import gzip
+
+    from click.testing import CliRunner
+
     gz_file = tmp_path / "dupe_emails.mbox.gz"
 
     # Simulate a small mbox with 3 'From ' boundaries: 2 duplicates, 1 unique with an "ATTACH:" placeholder
