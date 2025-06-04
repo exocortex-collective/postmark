@@ -25,6 +25,18 @@ uv pip install -e ".[dev]"
 pre-commit install
 ```
 
+### Project Structure
+
+```
+src/
+  postmark/
+    __init__.py
+    storage/      # SQLite, Parquet, S3 operations
+    email/        # RFC822 parsing, normalization
+    sync/         # Gmail API, IMAP synchronization
+    cli/          # Command-line interfaces
+```
+
 ### Testing
 
 ```bash
