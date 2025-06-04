@@ -4,7 +4,7 @@ import os
 import click
 
 
-def normalize_path(p):
+def normalize_path(p: str) -> str:
     return os.path.abspath(os.path.normpath(os.path.expandvars(os.path.expanduser(p))))
 
 
