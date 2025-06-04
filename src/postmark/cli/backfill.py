@@ -119,6 +119,10 @@ def main(
 ) -> None:
     load_dotenv()
 
+    # Ensure ~/.postmark folder exists
+    postmark_dir = Path("~/.postmark").expanduser()
+    postmark_dir.mkdir(parents=True, exist_ok=True)
+
     # Normalize all paths
     gz = normalize_path(gz)
     db_path = normalize_path(db_path)
