@@ -39,7 +39,7 @@ def parse_eml(path: Path) -> Email:
     # Convert date string → datetime (simplest approach)
     # (You might need dateutil.parser.parse or time.strptime)
     # For brevity, below is a naive approach:
-    from email.utils import parsedate_to_datetime, getaddresses
+    from email.utils import getaddresses, parsedate_to_datetime
 
     parsed_dt = None
     if date_str:
@@ -47,9 +47,9 @@ def parse_eml(path: Path) -> Email:
     dt = parsed_dt
 
     # Extract To, Cc, Bcc addresses
-    to_list = msg.get_all("To", [])
-    cc_list = msg.get_all("Cc", [])
-    bcc_list = msg.get_all("Bcc", [])
+    to_list: list[str] = msg.get_all("To", [])
+    cc_list: list[str] = msg.get_all("Cc", [])
+    bcc_list: list[str] = msg.get_all("Bcc", [])
 
     to_addrs = [a for _, a in getaddresses(to_list)]
     cc_addrs = [a for _, a in getaddresses(cc_list)]

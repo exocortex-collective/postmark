@@ -20,7 +20,7 @@ TEST_EMAIL_EXPECTATIONS = {
         "body_text_len": 1337,
         "body_html_len": 0,
         "attachments_len": 0,
-        "to_addrs": [],
+        "to_addrs": ["pallen70@hotmail.com"],
         "cc_addrs": [],
         "bcc_addrs": [],
     },
@@ -34,7 +34,7 @@ TEST_EMAIL_EXPECTATIONS = {
         "body_text_len": 615,
         "body_html_len": 0,
         "attachments_len": 0,
-        "to_addrs": [],
+        "to_addrs": ["ina.rangel@enron.com"],
         "cc_addrs": [],
         "bcc_addrs": [],
     },
@@ -48,7 +48,7 @@ TEST_EMAIL_EXPECTATIONS = {
         "body_text_len": 78,
         "body_html_len": 0,
         "attachments_len": 0,
-        "to_addrs": [],
+        "to_addrs": ["cbpres@austin.rr.com"],
         "cc_addrs": [],
         "bcc_addrs": [],
     },
@@ -62,7 +62,7 @@ TEST_EMAIL_EXPECTATIONS = {
         "body_text_len": 958,
         "body_html_len": 0,
         "attachments_len": 0,
-        "to_addrs": [],
+        "to_addrs": ["faith.killen@enron.com"],
         "cc_addrs": [],
         "bcc_addrs": [],
     },
@@ -76,7 +76,7 @@ TEST_EMAIL_EXPECTATIONS = {
         "body_text_len": 1595,
         "body_html_len": 0,
         "attachments_len": 0,
-        "to_addrs": [],
+        "to_addrs": ["pallen70@hotmail.com"],
         "cc_addrs": [],
         "bcc_addrs": [],
     },
@@ -90,7 +90,11 @@ TEST_EMAIL_EXPECTATIONS = {
         "body_text_len": 1518,
         "body_html_len": 0,
         "attachments_len": 0,
-        "to_addrs": [],
+        "to_addrs": [
+            "mike.grigsby@enron.com",
+            "keith.holst@enron.com",
+            "frank.ermis@enron.com",
+        ],
         "cc_addrs": [],
         "bcc_addrs": [],
     },
@@ -104,7 +108,7 @@ TEST_EMAIL_EXPECTATIONS = {
         "body_text_len": 504,
         "body_html_len": 0,
         "attachments_len": 0,
-        "to_addrs": [],
+        "to_addrs": ["pallen70@hotmail.com"],
         "cc_addrs": [],
         "bcc_addrs": [],
     },
@@ -118,7 +122,7 @@ TEST_EMAIL_EXPECTATIONS = {
         "body_text_len": 119,
         "body_html_len": 0,
         "attachments_len": 0,
-        "to_addrs": [],
+        "to_addrs": ["cbpres@austin.rr.com"],
         "cc_addrs": [],
         "bcc_addrs": [],
     },
@@ -132,7 +136,7 @@ TEST_EMAIL_EXPECTATIONS = {
         "body_text_len": 479,
         "body_html_len": 0,
         "attachments_len": 0,
-        "to_addrs": [],
+        "to_addrs": ["colin.tonks@enron.com"],
         "cc_addrs": [],
         "bcc_addrs": [],
     },
@@ -173,11 +177,8 @@ def test_eml_fixture_parse(eml_path: Path) -> None:
         assert len(email_obj.body_text) == expected["body_text_len"]
         assert len(email_obj.body_html) == expected["body_html_len"]
         assert len(email_obj.attachments) == expected["attachments_len"]
-        if "to_addrs" in expected:
-            assert email_obj.to_addrs == expected["to_addrs"]
-        if "cc_addrs" in expected:
-            assert email_obj.cc_addrs == expected["cc_addrs"]
-        if "bcc_addrs" in expected:
-            assert email_obj.bcc_addrs == expected["bcc_addrs"]
+        assert email_obj.to_addrs == expected["to_addrs"]
+        assert email_obj.cc_addrs == expected["cc_addrs"]
+        assert email_obj.bcc_addrs == expected["bcc_addrs"]
     else:
         raise ValueError(f"No expectations for {base_name}")
