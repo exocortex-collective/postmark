@@ -32,7 +32,8 @@ def create_schema(conn: Connection) -> None:
             parquet_row INTEGER NOT NULL,
             to_addrs TEXT,
             cc_addrs TEXT,
-            bcc_addrs TEXT
+            bcc_addrs TEXT,
+            in_reply_to TEXT
         );
         """
     )
