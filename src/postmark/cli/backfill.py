@@ -170,6 +170,12 @@ def process_email(
     help="S3 bucket name; default from .env or 'postmark-attachments'",
     type=str,
 )
+@click.option(
+    "--max-emails",
+    type=int,
+    default=None,
+    help="Stop after processing this many emails"
+)
 def main(
     gz: str,
     db_path: str,
@@ -180,6 +186,7 @@ def main(
     aws_access_key_id: str = "minioadmin",
     aws_secret_access_key: str = "minioadmin",
     bucket_name: str = "postmark-attachments",
+    max_emails: int = None,
 ) -> None:
     load_dotenv()
 
@@ -213,6 +220,9 @@ def main(
     with igz.IndexedGzipFile(gz) as f:
         for i, eml_raw in enumerate(_extract_eml_blobs(f), start=1):
             count = i
+            if max_emails and count >= max_emails:
+                click.echo(f"Reached max_emails limit of {max_emails}, stopping...")
+                break
             err = process_email(
                 eml_raw,
                 i,
