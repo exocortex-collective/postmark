@@ -30,7 +30,12 @@ def parse_eml(path: Path) -> Email:
     with path.open("rb") as f:
         msg = BytesParser().parse(f)
     # Basic fields
-    eml_uuid = str(uuid.uuid4())
+    eml_uuid = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_DNS,
+            f"{message_id or ''}-{dt.isoformat() if dt else ''}"
+        )
+    )
     message_id = msg["Message-Id"]
     date_str = msg["Date"]
     subject = msg["Subject"] or ""
