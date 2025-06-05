@@ -116,60 +116,60 @@ def process_email(
         return e
 
 
-@click.command()  # type: ignore[misc]
-@click.argument("gz", type=click.Path(exists=True), required=True)  # type: ignore[misc]
+@click.command()
+@click.argument("gz", type=click.Path(exists=True), required=True)
 @click.option(
     "--db-path",
     default="~/.postmark/emails.db",
     help="Path to the SQLite DB",
     type=str,
     required=True,
-)  # type: ignore[misc]
+)
 @click.option(
     "--parquet-dir",
     default="~/.postmark/parquet",
     help="Directory to store Parquet files",
     type=str,
     required=True,
-)  # type: ignore[misc]
+)
 @click.option(
     "--dry-run",
     is_flag=True,
     default=False,
     help="Perform a dry run without side effects",
     type=bool,
-)  # type: ignore[misc]
+)
 @click.option(
     "--fail-fast",
     is_flag=True,
     default=False,
     help="Stop on first error or push to dead-letter queue",
     type=bool,
-)  # type: ignore[misc]
+)
 @click.option(
     "--endpoint-url",
     default=lambda: os.environ.get("AWS_S3_ENDPOINT", "http://localhost:9000"),
     help="S3/MinIO endpoint URL; default from .env or http://localhost:9000",
     type=str,
-)  # type: ignore[misc]
+)
 @click.option(
     "--aws-access-key-id",
     default=lambda: os.environ.get("MINIO_ROOT_USER", "minioadmin"),
     help="AWS/MinIO Access Key ID; default from .env or 'minioadmin'",
     type=str,
-)  # type: ignore[misc]
+)
 @click.option(
     "--aws-secret-access-key",
     default=lambda: os.environ.get("MINIO_ROOT_PASSWORD", "minioadmin"),
     help="AWS/MinIO Secret Access Key; default from .env or 'minioadmin'",
     type=str,
-)  # type: ignore[misc]
+)
 @click.option(
     "--bucket-name",
     default=lambda: os.environ.get("S3_BUCKET", "postmark-attachments"),
     help="S3 bucket name; default from .env or 'postmark-attachments'",
     type=str,
-)  # type: ignore[misc]
+)
 def main(
     gz: str,
     db_path: str,
