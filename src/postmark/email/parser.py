@@ -55,6 +55,9 @@ def parse_eml(path: Path) -> Email:
     cc_addrs = [a for _, a in getaddresses(cc_list)]
     bcc_addrs = [a for _, a in getaddresses(bcc_list)]
 
+    # Extract In-Reply-To header
+    in_reply_to = msg["In-Reply-To"]
+
     # Extract body text & HTML
     body_text = []
     body_html = []
@@ -89,6 +92,7 @@ def parse_eml(path: Path) -> Email:
         to_addrs=to_addrs,
         cc_addrs=cc_addrs,
         bcc_addrs=bcc_addrs,
+        in_reply_to=in_reply_to,
     )
 
 
