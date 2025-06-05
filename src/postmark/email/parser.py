@@ -5,8 +5,17 @@ from datetime import datetime
 from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path
+from typing import Optional
 
 from bs4 import BeautifulSoup
+
+
+@dataclass
+class Attachment:
+    name: str
+    mime_type: str
+    payload: bytes
+    size: int
 
 
 @dataclass
@@ -18,21 +27,22 @@ class Email:
     from_addr: str
     body_text: str
     body_html: str
-    attachments: list[str] = field(default_factory=list)
+    raw_msg: bytes
     in_reply_to: str | None = None
+    attachments: list[Attachment] = field(default_factory=list)
     references: list[str] = field(default_factory=list)
     to_addrs: list[str] = field(default_factory=list)
     cc_addrs: list[str] = field(default_factory=list)
     bcc_addrs: list[str] = field(default_factory=list)
 
 
-def parse_eml(path: Path) -> Email:
+def parse_email(path: Path) -> Email:
     with path.open("rb") as f:
         msg = BytesParser().parse(f)
     # Basic fields
     message_id = msg["Message-Id"]
     date_str = msg["Date"]
-    subject = msg["Subject"] or ""
+    subject = str(msg["Subject"] or "")
     from_addr = msg["From"] or ""
 
     # Convert date string → datetime (simplest approach)
@@ -43,14 +53,10 @@ def parse_eml(path: Path) -> Email:
     parsed_dt = None
     if date_str:
         parsed_dt = parsedate_to_datetime(date_str)
-    dt = parsed_dt
+    dt: Optional[datetime] = parsed_dt
 
-    eml_uuid = str(
-        uuid.uuid5(
-            uuid.NAMESPACE_DNS,
-            f"{message_id or ''}-{dt.isoformat() if dt else ''}"
-        )
-    )
+    dt_str = dt.isoformat() if dt is not None else ""
+    eml_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{message_id or ''}-{dt_str}"))
 
     # Extract To, Cc, Bcc addresses
     to_list: list[str] = msg.get_all("To", [])
@@ -67,7 +73,7 @@ def parse_eml(path: Path) -> Email:
     # Extract body text & HTML
     body_text = []
     body_html = []
-    attachments = []
+    attachments: list[Attachment] = []
     for part in msg.walk():
         ctype = part.get_content_type()
         if ctype in ["text/plain", "text/html"]:
@@ -84,7 +90,24 @@ def parse_eml(path: Path) -> Email:
                 body_html.append(text_part)
         elif part.get_filename():
             # It's an attachment
-            attachments.append(part.get_filename() or "unknown.bin")
+            payload = part.get_payload(decode=True)
+            if isinstance(payload, bytes):
+                pass
+            elif isinstance(payload, str):
+                payload = payload.encode("utf-8", errors="replace")
+            else:
+                payload = b""
+            name = part.get_filename() or "unknown.bin"
+            mime_type = part.get_content_type()
+            size = len(payload)
+            attachments.append(
+                Attachment(
+                    name=name,
+                    mime_type=mime_type,
+                    payload=payload,
+                    size=size,
+                )
+            )
 
     return Email(
         uuid=eml_uuid,
@@ -99,6 +122,7 @@ def parse_eml(path: Path) -> Email:
         cc_addrs=cc_addrs,
         bcc_addrs=bcc_addrs,
         in_reply_to=in_reply_to,
+        raw_msg=msg.as_bytes(),
     )
 
 

@@ -1,136 +1,25 @@
 import os
-import tempfile
 from pathlib import Path
-from sqlite3 import Connection
-from typing import IO, Any, Iterator, Optional
+from typing import Optional
 
 import click
 import indexed_gzip as igz
-import pyarrow as pa
 from dotenv import load_dotenv
 
-from postmark.email.dedup import BloomFilter, should_store
-from postmark.email.parser import Email, parse_eml
-from postmark.email.threading import detect_thread
-from postmark.storage.columnar import write_parquet
+from postmark.email.dedup import BloomFilter
+from postmark.email.processing import extract_email_blobs, process_email
+from postmark.storage.columnar import ColumnarWriter
 from postmark.storage.s3 import S3Client
-from postmark.storage.sqlite import (
-    create_connection,
-    create_schema,
-    insert_email,
-    write_dead_letter,
-)
-
-
-def normalize_path(p: str) -> str:
-    return os.path.abspath(os.path.normpath(os.path.expandvars(os.path.expanduser(p))))
-
-
-def _fake_resolver(key: str) -> Optional[Email]:
-    """Fake resolver for thread detection during dry run."""
-    return None
-
-
-def parse_eml_from_bytes(eml_raw: bytes) -> Email:
-    """
-    Write the bytes to a temporary file and parse it with parser.parse_eml.
-    """
-    from pathlib import Path
-
-    with tempfile.NamedTemporaryFile(suffix=".eml", delete=False) as tf:
-        tf.write(eml_raw)
-        tf.flush()
-        tmp_path = Path(tf.name)
-    parsed = parse_eml(tmp_path)
-    tmp_path.unlink(missing_ok=True)
-    return parsed
-
-
-def _extract_eml_blobs(f: IO[bytes]) -> Iterator[bytes]:
-    """
-    Extract complete EML blobs from a mbox file, looking for lines starting with 'From '.
-    """
-    current_email: list[bytes] = []
-    for line in f:
-        # Check if this line indicates a new email boundary
-        if line.startswith(b"From "):
-            # If we already accumulated lines, yield them
-            if current_email:
-                yield b"".join(current_email)
-                current_email.clear()
-        current_email.append(line)
-
-    # Yield any remaining lines after the final boundary
-    if current_email:
-        yield b"".join(current_email)
-
-
-def process_email(
-    eml_raw: bytes,
-    i: int,
-    bloom: BloomFilter,
-    recent_bodies: list[str],
-    s3_client: S3Client,
-    conn: Connection,
-    parquet_dir: str,
-    batch_rows: list[dict[str, Any]],
-    dry_run: bool,
-    fail_fast: bool,
-    gz: str,
-    batch_size: int,
-) -> Optional[Exception]:
-    try:
-        parse_eml_result = parse_eml_from_bytes(eml_raw)
-        if not should_store(parse_eml_result, bloom, recent_bodies):
-            return None
-        thread_id = detect_thread(parse_eml_result, resolver=_fake_resolver)
-        if dry_run:
-            pass
-        else:
-            if parse_eml_result.attachments:
-                for attach in parse_eml_result.attachments:
-                    key = f"{parse_eml_result.uuid}/1.2/{attach}"
-                    s3_client.put_bytes(key, b"PLACEHOLDER_ATTACHMENT_CONTENT")
-            insert_email(conn, parse_eml_result, thread_id)
-            batch_rows.append(
-                {
-                    "uuid": parse_eml_result.uuid,
-                    "subject": parse_eml_result.subject,
-                    "from_addr": parse_eml_result.from_addr,
-                    "body_text": parse_eml_result.body_text,
-                }
-            )
-            if len(batch_rows) >= batch_size:
-                out_path = Path(parquet_dir) / "emails.parquet"
-                write_parquet(
-                    pa.Table.from_pylist(batch_rows),
-                    out_path,
-                )
-                batch_rows.clear()
-        return None
-    except Exception as e:
-        if fail_fast:
-            raise
-        else:
-            write_dead_letter(conn, gz, i, e)
-        return e
+from postmark.storage.sqlite import create_connection, create_schema
 
 
 @click.command()
 @click.argument("gz", type=click.Path(exists=True), required=True)
 @click.option(
-    "--db-path",
-    default="~/.postmark/emails.db",
-    help="Path to the SQLite DB",
-    type=str,
-    required=True,
-)
-@click.option(
-    "--parquet-dir",
-    default="~/.postmark/parquet",
-    help="Directory to store Parquet files",
-    type=str,
-    required=True,
+    "--max-emails",
+    type=int,
+    default=None,
+    help="Stop after processing this many emails",
 )
 @click.option(
     "--dry-run",
@@ -145,6 +34,20 @@ def process_email(
     default=False,
     help="Stop on first error or push to dead-letter queue",
     type=bool,
+)
+@click.option(
+    "--db-path",
+    default=lambda: os.environ.get("DB_PATH", "~/.postmark/emails.db"),
+    help="Path to the SQLite DB. Can also be set with DB_PATH env var.",
+    type=str,
+    required=True,
+)
+@click.option(
+    "--parquet-dir",
+    default=lambda: os.environ.get("PARQUET_DIR", "~/.postmark/parquet"),
+    help="Directory to store Parquet files. Can also be set with PARQUET_DIR env var.",
+    type=str,
+    required=True,
 )
 @click.option(
     "--endpoint-url",
@@ -171,10 +74,11 @@ def process_email(
     type=str,
 )
 @click.option(
-    "--max-emails",
+    "--batch-size",
     type=int,
-    default=None,
-    help="Stop after processing this many emails"
+    default=lambda: int(os.environ.get("BATCH_SIZE", 1000)),
+    show_default="BATCH_SIZE env or 1000",
+    help="Number of emails to batch before writing to Parquet. Can also be set with BATCH_SIZE env var.",
 )
 def main(
     gz: str,
@@ -186,7 +90,8 @@ def main(
     aws_access_key_id: str = "minioadmin",
     aws_secret_access_key: str = "minioadmin",
     bucket_name: str = "postmark-attachments",
-    max_emails: int = None,
+    max_emails: Optional[int] = None,
+    batch_size: int = 1000,
 ) -> None:
     load_dotenv()
 
@@ -198,6 +103,7 @@ def main(
     gz = normalize_path(gz)
     db_path = normalize_path(db_path)
     parquet_dir = normalize_path(parquet_dir)
+    parquet_path = Path(parquet_dir) / "emails.parquet"
 
     # Initialize the S3 client and SQLite
     s3_client = S3Client(
@@ -212,13 +118,12 @@ def main(
     # Initialize deduplication components
     bloom = BloomFilter(capacity=1000000, error_rate=0.001)
     recent_bodies: list[str] = []
-    batch_rows: list[dict[str, Any]] = []
-    batch_size = 1000
+    columnar_writer = ColumnarWriter(parquet_path, batch_size)
 
     # Read the specified gzip file in streaming mode
     count = 0
     with igz.IndexedGzipFile(gz) as f:
-        for i, eml_raw in enumerate(_extract_eml_blobs(f), start=1):
+        for i, eml_raw in enumerate(extract_email_blobs(f), start=1):
             count = i
             if max_emails and count >= max_emails:
                 click.echo(f"Reached max_emails limit of {max_emails}, stopping...")
@@ -230,12 +135,10 @@ def main(
                 recent_bodies,
                 s3_client,
                 conn,
-                parquet_dir,
-                batch_rows,
+                columnar_writer,
                 dry_run,
                 fail_fast,
                 gz,
-                batch_size,
             )
             if err:
                 click.echo(f"Error processing email {count}: {err}")
@@ -243,13 +146,11 @@ def main(
             if count % 1000 == 0:
                 click.echo(f"Processed {count} emails so far...")
 
-    # Write any remaining batch
-    if not dry_run and batch_rows:
-        out_path = Path(parquet_dir) / "emails.parquet"
-        write_parquet(
-            pa.Table.from_pylist(batch_rows),
-            out_path,
-        )
-        batch_rows.clear()
+    if not dry_run:
+        columnar_writer.flush()
 
     click.echo(f"Processed {count} lines total (dry run: {dry_run}).")
+
+
+def normalize_path(p: str) -> str:
+    return os.path.abspath(os.path.normpath(os.path.expandvars(os.path.expanduser(p))))

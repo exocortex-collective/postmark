@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from postmark.email.parser import parse_eml
+from postmark.email.parser import parse_email
 
 # Dictionary of per-file test expectations.
 # "key" should match the base name (stem) of the .eml file
@@ -152,7 +152,7 @@ def test_eml_fixture_parse(eml_path: Path) -> None:
     """
     Automatically parses each .eml file in tests/eml_fixtures/.
     """
-    email_obj = parse_eml(eml_path)
+    email_obj = parse_email(eml_path)
     # Minimal assertion: ensure it parsed successfully (e.g. has a uuid)
     assert email_obj.uuid, f"Email in {eml_path} did not parse properly"
 
