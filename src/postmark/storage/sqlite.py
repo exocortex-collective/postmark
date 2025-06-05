@@ -67,10 +67,10 @@ def insert_email(conn: Connection, email_obj: Email, thread_id: str) -> None:
     sql = """
         INSERT INTO emails (
             uuid, message_id, date, subject, from_addr,
-            to_addrs, cc_addrs, bcc_addrs,
+            to_addrs, cc_addrs, bcc_addrs, in_reply_to,
             schema_version, parquet_file, parquet_row
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'pending', -1)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'pending', -1)
     """
     date_val = 0
     if email_obj.date is not None:
@@ -92,6 +92,7 @@ def insert_email(conn: Connection, email_obj: Email, thread_id: str) -> None:
             to_text,
             cc_text,
             bcc_text,
+            email_obj.in_reply_to or "",
         ),
     )
     conn.commit()
