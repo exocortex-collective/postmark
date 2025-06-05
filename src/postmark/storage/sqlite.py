@@ -29,7 +29,10 @@ def create_schema(conn: Connection) -> None:
             from_addr TEXT,
             schema_version INTEGER NOT NULL DEFAULT 1,
             parquet_file TEXT NOT NULL,
-            parquet_row INTEGER NOT NULL
+            parquet_row INTEGER NOT NULL,
+            to_addrs TEXT,
+            cc_addrs TEXT,
+            bcc_addrs TEXT
         );
         """
     )
@@ -62,12 +65,22 @@ def insert_email(conn: Connection, email_obj: Email, thread_id: str) -> None:
     Insert an Email record into the 'emails' table.
     """
     sql = """
-        INSERT INTO emails (uuid, message_id, date, subject, from_addr, schema_version, parquet_file, parquet_row)
-        VALUES (?, ?, ?, ?, ?, 1, 'pending', -1)
+        INSERT INTO emails (
+            uuid, message_id, date, subject, from_addr,
+            to_addrs, cc_addrs, bcc_addrs,
+            schema_version, parquet_file, parquet_row
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'pending', -1)
     """
     date_val = 0
     if email_obj.date is not None:
         date_val = int(email_obj.date.timestamp())
+
+    # Convert lists to comma-separated strings
+    to_text = ",".join(email_obj.to_addrs or [])
+    cc_text = ",".join(email_obj.cc_addrs or [])
+    bcc_text = ",".join(email_obj.bcc_addrs or [])
+
     conn.execute(
         sql,
         (
@@ -76,6 +89,9 @@ def insert_email(conn: Connection, email_obj: Email, thread_id: str) -> None:
             date_val,
             email_obj.subject or "",
             email_obj.from_addr or "",
+            to_text,
+            cc_text,
+            bcc_text,
         ),
     )
     conn.commit()

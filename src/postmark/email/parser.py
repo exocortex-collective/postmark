@@ -21,6 +21,9 @@ class Email:
     attachments: list[str] = field(default_factory=list)
     in_reply_to: str | None = None
     references: list[str] = field(default_factory=list)
+    to_addrs: list[str] = field(default_factory=list)
+    cc_addrs: list[str] = field(default_factory=list)
+    bcc_addrs: list[str] = field(default_factory=list)
 
 
 def parse_eml(path: Path) -> Email:
@@ -36,12 +39,21 @@ def parse_eml(path: Path) -> Email:
     # Convert date string → datetime (simplest approach)
     # (You might need dateutil.parser.parse or time.strptime)
     # For brevity, below is a naive approach:
-    from email.utils import parsedate_to_datetime
+    from email.utils import parsedate_to_datetime, getaddresses
 
     parsed_dt = None
     if date_str:
         parsed_dt = parsedate_to_datetime(date_str)
     dt = parsed_dt
+
+    # Extract To, Cc, Bcc addresses
+    to_list = msg.get_all("To", [])
+    cc_list = msg.get_all("Cc", [])
+    bcc_list = msg.get_all("Bcc", [])
+
+    to_addrs = [a for _, a in getaddresses(to_list)]
+    cc_addrs = [a for _, a in getaddresses(cc_list)]
+    bcc_addrs = [a for _, a in getaddresses(bcc_list)]
 
     # Extract body text & HTML
     body_text = []
@@ -74,6 +86,9 @@ def parse_eml(path: Path) -> Email:
         body_text="\n".join(body_text),
         body_html="\n".join(body_html),
         attachments=attachments,
+        to_addrs=to_addrs,
+        cc_addrs=cc_addrs,
+        bcc_addrs=bcc_addrs,
     )
 
 
