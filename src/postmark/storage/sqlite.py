@@ -1,4 +1,5 @@
 import sqlite3
+import traceback
 from sqlite3 import Connection
 
 from postmark.email.parser import Email
@@ -119,5 +120,6 @@ def write_dead_letter(
         INSERT INTO dead_letter_queue (source_file, file_offset, error_type, error_message, traceback, created_at)
         VALUES (?, ?, ?, ?, ?, strftime('%s','now'))
     """
-    conn.execute(sql2, (source_file, offset, type(ex).__name__, str(ex), ""))
+    trace_str = traceback.format_exc()
+    conn.execute(sql2, (source_file, offset, type(ex).__name__, str(ex), trace_str))
     conn.commit()
