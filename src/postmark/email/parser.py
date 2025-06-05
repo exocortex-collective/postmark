@@ -30,12 +30,6 @@ def parse_eml(path: Path) -> Email:
     with path.open("rb") as f:
         msg = BytesParser().parse(f)
     # Basic fields
-    eml_uuid = str(
-        uuid.uuid5(
-            uuid.NAMESPACE_DNS,
-            f"{message_id or ''}-{dt.isoformat() if dt else ''}"
-        )
-    )
     message_id = msg["Message-Id"]
     date_str = msg["Date"]
     subject = msg["Subject"] or ""
@@ -50,6 +44,13 @@ def parse_eml(path: Path) -> Email:
     if date_str:
         parsed_dt = parsedate_to_datetime(date_str)
     dt = parsed_dt
+
+    eml_uuid = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_DNS,
+            f"{message_id or ''}-{dt.isoformat() if dt else ''}"
+        )
+    )
 
     # Extract To, Cc, Bcc addresses
     to_list: list[str] = msg.get_all("To", [])
