@@ -76,7 +76,8 @@ def strip_non_text_attachments(msg: Message) -> EmailMessage:
             if not isinstance(part, EmailMessage):
                 em = EmailMessage()
                 for k, v in part.items():
-                    em[k] = v
+                    v_clean = v.replace('\r', ' ').replace('\n', ' ')
+                    em[k] = v_clean
                 payload = part.get_payload(decode=True)
                 if isinstance(payload, bytes):
                     charset = part.get_content_charset() or "utf-8"
