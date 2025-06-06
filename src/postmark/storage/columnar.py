@@ -71,6 +71,8 @@ class ColumnarWriter:
         out_file = self.root_path / f"{month_key}.parquet"
         out_file.parent.mkdir(parents=True, exist_ok=True)
 
+        # No need to group again; records are already for this month
+
         new_table = create_email_table(records)
 
         # Merge with existing file if present
