@@ -46,7 +46,8 @@ def create_email_table(batch: list[dict[str, Any]]) -> pa.Table:
 
 class ColumnarWriter:
     def __init__(self, path: Path, batch_size: int = 1000) -> None:
-        self.path = path
+        # Treat the given path as the root directory for monthly partitions
+        self.root_path = path
         self.batch_size = batch_size
         self.batch: list[dict[str, Any]] = []
 
@@ -58,12 +59,24 @@ class ColumnarWriter:
     def flush(self) -> None:
         if not self.batch:
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        table = create_email_table(self.batch)
-        if self.path.exists():
-            old_table = pq.read_table(str(self.path))
-            merged = pa.concat_tables([old_table, table])
-            pq.write_table(merged, str(self.path), compression="zstd")
-        else:
-            pq.write_table(table, str(self.path), compression="zstd")
+
+        from collections import defaultdict
+        grouped_records = defaultdict(list)
+        for record in self.batch:
+            # Assuming record["date"] is a pa.scalar
+            dt = record["date"].as_py()
+            partition_name = dt.strftime("%Y-%m")
+            grouped_records[partition_name].append(record)
+
+        for partition_name, records in grouped_records.items():
+            out_file = self.root_path / f"{partition_name}.parquet"
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+            table = create_email_table(records)
+            if out_file.exists():
+                old_table = pq.read_table(str(out_file))
+                merged = pa.concat_tables([old_table, table])
+                pq.write_table(merged, str(out_file), compression="zstd")
+            else:
+                pq.write_table(table, str(out_file), compression="zstd")
+
         self.batch.clear()
