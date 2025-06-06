@@ -68,19 +68,18 @@ class ColumnarWriter:
 
         out_file = self.root_path / f"{month_key}.parquet"
         out_file.parent.mkdir(parents=True, exist_ok=True)
-        table = create_email_table(records)
+
+        new_table = create_email_table(records)
+
+        # Merge with existing file if present
         if out_file.exists():
             old_table = pq.read_table(str(out_file))
-            merged = pa.concat_tables([old_table, table])
-            # Sort merged table by date (ascending)
-            sort_indices = pc.sort_indices(merged, sort_keys=[("date", "ascending")])
-            sorted_table = pc.take(merged, sort_indices)
-            pq.write_table(sorted_table, str(out_file), compression="zstd")
-        else:
-            # Sort new table by date (ascending)
-            sort_indices = pc.sort_indices(table, sort_keys=[("date", "ascending")])
-            sorted_table = pc.take(table, sort_indices)
-            pq.write_table(sorted_table, str(out_file), compression="zstd")
+            new_table = pa.concat_tables([old_table, new_table])
+
+        # Sort by date and write
+        sort_indices = pc.sort_indices(new_table, sort_keys=[("date", "ascending")])
+        sorted_table = pc.take(new_table, sort_indices)
+        pq.write_table(sorted_table, str(out_file), compression="zstd")
 
         self.month_batches[month_key].clear()
 
