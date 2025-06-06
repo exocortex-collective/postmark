@@ -14,6 +14,7 @@ class S3Client:
     ) -> None:
         self.s3 = boto3.resource(
             "s3",
+            region_name="us-east-1",
             endpoint_url=endpoint_url,
             aws_access_key_id=aws_access_key_id,
             aws_secret_access_key=aws_secret_access_key,

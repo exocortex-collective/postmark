@@ -2,12 +2,12 @@ import gzip
 from pathlib import Path
 
 from click.testing import CliRunner
-from moto import mock_aws
+from moto import mock_s3
 
 from postmark.cli.backfill import main
 
 
-@mock_aws
+@mock_s3
 def test_backfill_dry_run(tmp_path: Path) -> None:
     # Create a test .gz containing 3 lines
     gz_file = tmp_path / "test_emails.gz"
@@ -34,14 +34,14 @@ def test_backfill_dry_run(tmp_path: Path) -> None:
         f.write(b"Hello from email 2\n")
 
     runner = CliRunner()
-    result = runner.invoke(main, [str(gz_file), "--dry-run"], catch_exceptions=False)
+    result = runner.invoke(main, [str(gz_file), "--dry-run", "--endpoint-url", ""], catch_exceptions=False)
 
     # Verify the output mentions the 3 processed lines
     assert "Processed 3 lines total (dry run: True)." in result.output
     assert result.exit_code == 0
 
 
-@mock_aws
+@mock_s3
 def test_backfill_duplicates_and_attachments(tmp_path: Path) -> None:
     """
     Creates a .gz with two duplicated EMLs and one unique EML;
@@ -89,7 +89,7 @@ def test_backfill_duplicates_and_attachments(tmp_path: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(
         main,
-        [str(gz_file), "--dry-run"],  # Remove "--dry-run" to test side effects
+        [str(gz_file), "--dry-run", "--endpoint-url", ""],  # Remove "--dry-run" to test side effects
         catch_exceptions=False,
     )
     # Verify that 3 emails were processed and no crash occurred
