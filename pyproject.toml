@@ -51,7 +51,22 @@ where = ["src"]
 [tool.black]
 line-length = 88
 target-version = ['py310']
-force-exclude = "^tests/eml_fixtures/.*"
+force-exclude = '''
+/(
+    \.venv
+    | venv
+    | build
+    | dist
+    | \.eggs
+    | \.git
+    | \.hg
+    | \.mypy_cache
+    | \.tox
+    | \.svn
+    | \.ipynb_checkpoints
+    | tests/eml_fixtures
+)/
+'''
 
 [tool.isort]
 profile = "black"

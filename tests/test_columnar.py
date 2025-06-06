@@ -22,6 +22,7 @@ def test_write_and_read_parquet(tmp_path: Path) -> None:
 
 def test_columnar_writer_partitions_by_month(tmp_path: Path) -> None:
     from datetime import datetime
+
     from postmark.email.parser import Email
     from postmark.storage.columnar import ColumnarWriter
 
@@ -33,13 +34,23 @@ def test_columnar_writer_partitions_by_month(tmp_path: Path) -> None:
             uuid="uuid-jan",
             message_id="<jan@domain>",
             date=datetime(2023, 1, 15),
-            raw_msg="January message",
+            subject="",
+            from_addr="",
+            body_text="",
+            body_html="",
+            raw_msg=b"January message",
+            attachments=[],
         ),
         Email(
             uuid="uuid-feb",
             message_id="<feb@domain>",
             date=datetime(2023, 2, 10),
-            raw_msg="February message",
+            subject="",
+            from_addr="",
+            body_text="",
+            body_html="",
+            raw_msg=b"February message",
+            attachments=[],
         ),
     ]
 
@@ -56,6 +67,7 @@ def test_columnar_writer_partitions_by_month(tmp_path: Path) -> None:
     # Optionally read back and verify data:
     import pyarrow as pa
     import pyarrow.parquet as pq
+
     jan_table = pq.read_table(str(jan_file))
     feb_table = pq.read_table(str(feb_file))
     assert jan_table.num_rows == 1
