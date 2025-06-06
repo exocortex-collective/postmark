@@ -1,5 +1,6 @@
 import re
 import tempfile
+from pprint import pprint
 from sqlite3 import Connection
 from typing import IO, Iterator, Optional
 
@@ -62,6 +63,7 @@ def process_email(
         return None
     except Exception as e:
         if fail_fast:
+            pprint(parse_email_result)
             raise
         else:
             write_dead_letter(conn, gz, i, e)
@@ -105,3 +107,15 @@ def extract_email_blobs(f: IO[bytes]) -> Iterator[bytes]:
     # Yield any remaining lines after the final boundary
     if current_email:
         yield b"".join(current_email)
+
+
+# TODO:
+# From blank
+# rename addr to address
+# None is in in_reply_to
+# Some dates are 0
+# unknown encoding: text/plain
+# unknown encoding: "utf-8" format=flowed
+# unknown encoding: charset=us-ascii
+# unknown encoding: _iso-2022-jp$esc
+# split parquet files

@@ -27,7 +27,7 @@ def create_email_record(email: Email) -> dict[str, Any]:
     return {
         "uuid": email.uuid,
         "msg_id": email.message_id,
-        "date": pa.scalar(email.date, type=pa.timestamp("s")),
+        "date": pa.scalar(email.date, type=pa.timestamp("ms")),
         "raw_msg": email.raw_msg,
     }
 
@@ -37,7 +37,7 @@ def create_email_table(batch: list[dict[str, Any]]) -> pa.Table:
         [
             ("uuid", pa.string()),
             ("msg_id", pa.string()),
-            ("date", pa.timestamp("s")),
+            ("date", pa.timestamp("ms")),
             ("raw_msg", pa.string()),
         ]
     )

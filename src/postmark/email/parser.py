@@ -36,6 +36,18 @@ class Email:
     bcc_addrs: list[str] = field(default_factory=list)
 
 
+def parse_email_date(date_str: str | None) -> Optional[datetime]:
+    """Parse a date string to datetime, or return None if invalid."""
+    if not date_str:
+        return None
+    from email.utils import parsedate_to_datetime
+
+    try:
+        return parsedate_to_datetime(date_str)
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_email(path: Path) -> Email:
     with path.open("rb") as f:
         msg = BytesParser().parse(f)
@@ -43,17 +55,11 @@ def parse_email(path: Path) -> Email:
     message_id = msg["Message-Id"]
     date_str = msg["Date"]
     subject = str(msg["Subject"] or "")
-    from_addr = msg["From"] or ""
+    from_addr = str(msg["From"] or "")
 
-    # Convert date string → datetime (simplest approach)
-    # (You might need dateutil.parser.parse or time.strptime)
-    # For brevity, below is a naive approach:
-    from email.utils import getaddresses, parsedate_to_datetime
+    from email.utils import getaddresses
 
-    parsed_dt = None
-    if date_str:
-        parsed_dt = parsedate_to_datetime(date_str)
-    dt: Optional[datetime] = parsed_dt
+    dt = parse_email_date(date_str)
 
     dt_str = dt.isoformat() if dt is not None else ""
     eml_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{message_id or ''}-{dt_str}"))
@@ -63,12 +69,12 @@ def parse_email(path: Path) -> Email:
     cc_list: list[str] = msg.get_all("Cc", [])
     bcc_list: list[str] = msg.get_all("Bcc", [])
 
-    to_addrs = [a for _, a in getaddresses(to_list)]
-    cc_addrs = [a for _, a in getaddresses(cc_list)]
-    bcc_addrs = [a for _, a in getaddresses(bcc_list)]
+    to_addrs = [str(a) for _, a in getaddresses(to_list)]
+    cc_addrs = [str(a) for _, a in getaddresses(cc_list)]
+    bcc_addrs = [str(a) for _, a in getaddresses(bcc_list)]
 
     # Extract In-Reply-To header
-    in_reply_to = msg["In-Reply-To"]
+    in_reply_to = str(msg["In-Reply-To"])
 
     # Extract body text & HTML
     body_text = []
