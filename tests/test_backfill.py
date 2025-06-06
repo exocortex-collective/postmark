@@ -2,12 +2,12 @@ import gzip
 from pathlib import Path
 
 from click.testing import CliRunner
-from moto import mock_s3
+from moto import mock_aws
 
 from postmark.cli.backfill import main
 
 
-@mock_s3
+@mock_aws
 def test_backfill_dry_run(tmp_path: Path) -> None:
     # Create a test .gz containing 3 lines
     gz_file = tmp_path / "test_emails.gz"
@@ -41,7 +41,7 @@ def test_backfill_dry_run(tmp_path: Path) -> None:
     assert result.exit_code == 0
 
 
-@mock_s3
+@mock_aws
 def test_backfill_duplicates_and_attachments(tmp_path: Path) -> None:
     """
     Creates a .gz with two duplicated EMLs and one unique EML;
