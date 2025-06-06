@@ -2,6 +2,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from email.message import EmailMessage, Message
 from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path
@@ -46,6 +47,45 @@ def parse_email_date(date_str: str | None) -> Optional[datetime]:
         return parsedate_to_datetime(date_str)
     except (TypeError, ValueError):
         return None
+
+
+def strip_non_text_attachments(msg: Message) -> EmailMessage:
+    """Return a copy of msg with only text/plain and text/html parts (and no other attachments)."""
+    if not msg.is_multipart():
+        ctype = msg.get_content_type()
+        if ctype in ("text/plain", "text/html"):
+            em = EmailMessage()
+            payload = msg.get_payload(decode=True)
+            if isinstance(payload, bytes):
+                charset = msg.get_content_charset() or "utf-8"
+                em.set_content(payload.decode(charset, errors="replace"))
+            else:
+                em.set_content(str(payload or ""))
+            return em
+        new_msg = EmailMessage()
+        new_msg.set_content("")
+        return new_msg
+    new_msg = EmailMessage()
+    for k, v in msg.items():
+        new_msg[k] = v
+    parts = msg.iter_parts() if hasattr(msg, "iter_parts") else msg.walk()
+    for part in parts:
+        ctype = part.get_content_type()
+        if ctype in ("text/plain", "text/html"):
+            if not isinstance(part, EmailMessage):
+                em = EmailMessage()
+                for k, v in part.items():
+                    em[k] = v
+                payload = part.get_payload(decode=True)
+                if isinstance(payload, bytes):
+                    charset = part.get_content_charset() or "utf-8"
+                    em.set_content(payload.decode(charset, errors="replace"))
+                else:
+                    em.set_content(str(payload or ""))
+                new_msg.attach(em)
+            else:
+                new_msg.attach(part)
+    return new_msg
 
 
 def parse_email(path: Path) -> Email:
@@ -115,6 +155,8 @@ def parse_email(path: Path) -> Email:
                 )
             )
 
+    # Strip non-text attachments for raw_msg
+    msg_no_attach = strip_non_text_attachments(msg)
     return Email(
         uuid=eml_uuid,
         message_id=message_id,
@@ -128,7 +170,7 @@ def parse_email(path: Path) -> Email:
         cc_addrs=cc_addrs,
         bcc_addrs=bcc_addrs,
         in_reply_to=in_reply_to,
-        raw_msg=msg.as_bytes(),
+        raw_msg=msg_no_attach.as_bytes(),
     )
 
 

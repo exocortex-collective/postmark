@@ -46,22 +46,24 @@ def create_email_table(batch: list[dict[str, Any]]) -> pa.Table:
 
 class ColumnarWriter:
     def __init__(self, path: Path, batch_size: int = 1000) -> None:
-        self.root_path = path               # Directory for partitioned data
-        self.batch_size = batch_size        # Flush threshold per month partition
+        self.root_path = path  # Directory for partitioned data
+        self.batch_size = batch_size  # Flush threshold per month partition
         from collections import defaultdict
+
         self.month_batches: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
     def add(self, email: Email) -> None:
         record = create_email_record(email)
-        dt = record["date"].as_py()         # pa.scalar -> Python datetime
+        dt = record["date"].as_py()  # pa.scalar -> Python datetime
         month_key = dt.strftime("%Y-%m")
         self.month_batches[month_key].append(record)
         if len(self.month_batches[month_key]) >= self.batch_size:
             self._flush_month_partition(month_key)
 
     def _flush_month_partition(self, month_key: str) -> None:
-        import pyarrow.parquet as pq
         import pyarrow.compute as pc
+        import pyarrow.parquet as pq
+
         records = self.month_batches[month_key]
         if not records:
             return
