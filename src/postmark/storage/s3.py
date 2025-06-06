@@ -15,7 +15,7 @@ class S3Client:
         # Treat empty endpoint as None so Boto doesn't throw "Invalid endpoint:"
         if not endpoint_url:
             endpoint_url = None
-            
+
         self.s3 = boto3.resource(
             "s3",
             region_name="us-east-1",

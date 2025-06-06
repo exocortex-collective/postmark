@@ -34,7 +34,9 @@ def test_backfill_dry_run(tmp_path: Path) -> None:
         f.write(b"Hello from email 2\n")
 
     runner = CliRunner()
-    result = runner.invoke(main, [str(gz_file), "--dry-run", "--endpoint-url", ""], catch_exceptions=False)
+    result = runner.invoke(
+        main, [str(gz_file), "--dry-run", "--endpoint-url", ""], catch_exceptions=False
+    )
 
     # Verify the output mentions the 3 processed lines
     assert "Processed 3 lines total (dry run: True)." in result.output
@@ -89,7 +91,12 @@ def test_backfill_duplicates_and_attachments(tmp_path: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(
         main,
-        [str(gz_file), "--dry-run", "--endpoint-url", ""],  # Remove "--dry-run" to test side effects
+        [
+            str(gz_file),
+            "--dry-run",
+            "--endpoint-url",
+            "",
+        ],  # Remove "--dry-run" to test side effects
         catch_exceptions=False,
     )
     # Verify that 3 emails were processed and no crash occurred
