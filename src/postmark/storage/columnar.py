@@ -61,6 +61,7 @@ class ColumnarWriter:
             return
 
         from collections import defaultdict
+
         grouped_records = defaultdict(list)
         for record in self.batch:
             # Assuming record["date"] is a pa.scalar
