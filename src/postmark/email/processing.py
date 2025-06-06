@@ -30,6 +30,7 @@ def process_email(
     fail_fast: bool,
     gz: str,
 ) -> Optional[Exception]:
+    parse_email_result = None
     try:
         parse_email_result = parse_email_from_bytes(eml_raw)
         if not should_store(parse_email_result, bloom, recent_bodies):
