@@ -61,6 +61,7 @@ class ColumnarWriter:
 
     def _flush_month_partition(self, month_key: str) -> None:
         import pyarrow.parquet as pq
+        import pyarrow.compute as pc
         records = self.month_batches[month_key]
         if not records:
             return
@@ -71,9 +72,15 @@ class ColumnarWriter:
         if out_file.exists():
             old_table = pq.read_table(str(out_file))
             merged = pa.concat_tables([old_table, table])
-            pq.write_table(merged, str(out_file), compression="zstd")
+            # Sort merged table by date (ascending)
+            sort_indices = pc.sort_indices(merged, sort_keys=[("date", "ascending")])
+            sorted_table = pc.take(merged, sort_indices)
+            pq.write_table(sorted_table, str(out_file), compression="zstd")
         else:
-            pq.write_table(table, str(out_file), compression="zstd")
+            # Sort new table by date (ascending)
+            sort_indices = pc.sort_indices(table, sort_keys=[("date", "ascending")])
+            sorted_table = pc.take(table, sort_indices)
+            pq.write_table(sorted_table, str(out_file), compression="zstd")
 
         self.month_batches[month_key].clear()
 
