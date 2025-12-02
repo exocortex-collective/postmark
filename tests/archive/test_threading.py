@@ -1,8 +1,8 @@
 import datetime
 from typing import Optional
 
+from postmark.archive.threading import detect_thread
 from postmark.email.parser import Email
-from postmark.email.threading import detect_thread
 
 
 def fake_resolver(key: str) -> Optional[Email]:

@@ -4,10 +4,10 @@ from pprint import pprint
 from sqlite3 import Connection
 from typing import IO, Iterator, Optional
 
+from postmark.archive.storage.columnar import ColumnarWriter
+from postmark.archive.threading import detect_thread
 from postmark.email.dedup import BloomFilter, should_store
 from postmark.email.parser import Email, parse_email
-from postmark.email.threading import detect_thread
-from postmark.storage.columnar import ColumnarWriter
 from postmark.storage.s3 import S3Client
 from postmark.storage.sqlite import write_attachment, write_dead_letter, write_email
 

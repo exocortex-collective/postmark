@@ -4,7 +4,7 @@ from pathlib import Path
 from click.testing import CliRunner
 from moto import mock_aws
 
-from postmark.cli.backfill import main
+from postmark.archive.cli.backfill import main
 
 
 @mock_aws

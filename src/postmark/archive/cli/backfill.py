@@ -6,9 +6,9 @@ import click
 import indexed_gzip as igz
 from dotenv import load_dotenv
 
+from postmark.archive.email.processing import extract_email_blobs, process_email
+from postmark.archive.storage.columnar import ColumnarWriter
 from postmark.email.dedup import BloomFilter
-from postmark.email.processing import extract_email_blobs, process_email
-from postmark.storage.columnar import ColumnarWriter
 from postmark.storage.s3 import S3Client
 from postmark.storage.sqlite import create_connection, create_schema
 

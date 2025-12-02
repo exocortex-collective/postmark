@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pyarrow as pa
 
-from postmark.storage.columnar import read_parquet, write_parquet
+from postmark.archive.storage.columnar import read_parquet, write_parquet
 
 
 def test_write_and_read_parquet(tmp_path: Path) -> None:
@@ -23,8 +23,8 @@ def test_write_and_read_parquet(tmp_path: Path) -> None:
 def test_columnar_writer_partitions_by_month(tmp_path: Path) -> None:
     from datetime import datetime
 
+    from postmark.archive.storage.columnar import ColumnarWriter
     from postmark.email.parser import Email
-    from postmark.storage.columnar import ColumnarWriter
 
     writer = ColumnarWriter(tmp_path)
 

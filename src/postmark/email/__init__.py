@@ -1,5 +1,6 @@
 """Email parsing and processing utilities."""
 
-from .threading import detect_thread
+from .dedup import BloomFilter, should_store
+from .parser import parse_email
 
-__all__ = ["detect_thread"]
+__all__ = ["parse_email", "BloomFilter", "should_store"]
