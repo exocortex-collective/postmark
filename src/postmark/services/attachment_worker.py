@@ -17,7 +17,7 @@ import psycopg2
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
+from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 
 logging.basicConfig(
@@ -48,8 +48,8 @@ class AttachmentWorker:
         self.config = config
         self.running = True
         self._pg_conn: psycopg2.extensions.connection | None = None
-        self._s3_client: Any = None
-        self._gmail_service: Any = None
+        self._s3_client: Any = None  # boto3 S3 client (dynamically typed)
+        self._gmail_service: Resource | None = None
 
     def _get_pg_conn(self) -> psycopg2.extensions.connection:
         if self._pg_conn is None or self._pg_conn.closed:
@@ -79,7 +79,7 @@ class AttachmentWorker:
                 self._s3_client.create_bucket(Bucket=self.config.s3_bucket)
         return self._s3_client
 
-    def _get_gmail_service(self) -> Any:
+    def _get_gmail_service(self) -> Resource:
         if self._gmail_service is None:
             with open(self.config.gmail_token_path) as f:
                 token_data = json.load(f)
