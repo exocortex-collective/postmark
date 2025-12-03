@@ -133,7 +133,9 @@ def get_bodies(
     gmail_ids: str = Query(..., description="Comma-separated list of gmail IDs"),
 ) -> BodiesResponse:
     """Batch fetch email bodies (max 100)."""
-    id_list = [g.strip() for g in gmail_ids.split(",")]
+    id_list = [g.strip() for g in gmail_ids.split(",") if g.strip()]
+    if not id_list:
+        raise HTTPException(status_code=400, detail="No valid gmail_ids provided")
     if len(id_list) > 100:
         raise HTTPException(status_code=400, detail="Max 100 gmail_ids per request")
 

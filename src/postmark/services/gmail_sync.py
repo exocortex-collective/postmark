@@ -482,8 +482,13 @@ class GmailSync:
         from datetime import datetime, timedelta
 
         if after:
-            # Parse absolute date
-            after_date = datetime.strptime(after, "%Y-%m-%d").strftime("%Y/%m/%d")
+            # Parse absolute date with validation
+            try:
+                after_date = datetime.strptime(after, "%Y-%m-%d").strftime("%Y/%m/%d")
+            except ValueError:
+                raise ValueError(
+                    f"Invalid date format: '{after}'. Expected YYYY-MM-DD (e.g., 2025-01-01)"
+                )
             logger.info(f"Backfilling messages after {after_date}")
         elif days:
             after_date = (datetime.now() - timedelta(days=days)).strftime("%Y/%m/%d")

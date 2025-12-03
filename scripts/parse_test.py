@@ -8,7 +8,7 @@ import traceback
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import psycopg2
@@ -16,15 +16,7 @@ import psycopg2
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from postmark.email.gmail_parser import (
-    decode_base64_body,
-    decode_mime_header,
-    extract_body_from_parts,
-    extract_email_address_only,
-    extract_email_list,
-    get_header,
-    parse_date,
-)
+from postmark.email.gmail_parser import parse_gmail_message
 
 # Configuration - all required from environment (use .env.template as reference)
 POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "")
@@ -38,74 +30,42 @@ DUCKDB_LOCAL_PATH = os.environ.get("DUCKDB_PATH", "")
 
 
 @dataclass
-class ParsedEmail:
-    """Test-specific parsed email with thread_id for validation."""
+class TestParsedEmail:
+    """Test wrapper with thread_id and simplified fields for validation."""
 
     gmail_id: str
     thread_id: str
     from_addr: str
-    to_addr: str
+    to_addr: str  # First to address for simple validation
     cc: list[str]
-    bcc: str
+    bcc: list[str]
     subject: str
     date: datetime | None
     body_text: str
     body_html: str
 
 
-def parse_email(row: dict[str, Any], body_data: dict[str, Any]) -> ParsedEmail:
-    """Parse a raw email into structured fields for testing."""
-    headers = row["headers"]  # Already JSON
+def parse_email(row: dict[str, Any], body_data: dict[str, Any]) -> TestParsedEmail:
+    """Parse using production code and wrap for testing."""
+    # Use the production parser
+    parsed = parse_gmail_message(row, body_data)
 
-    from_addr = extract_email_address_only(get_header(headers, "From"))
-    to_addr = extract_email_address_only(get_header(headers, "To"))
-    # Fall back to Delivered-To for BCC'd emails or undisclosed-recipients
-    if not to_addr or "undisclosed-recipients" in to_addr.lower():
-        to_addr = extract_email_address_only(get_header(headers, "Delivered-To"))
-    cc = extract_email_list(get_header(headers, "Cc"))
-    bcc = extract_email_address_only(get_header(headers, "Bcc"))
-    subject = decode_mime_header(get_header(headers, "Subject"))
-    date = parse_date(get_header(headers, "Date"), row["internal_date"])
-
-    # Extract body from DuckDB data (API returns parsed JSON, local may return string)
-    parts = body_data.get("parts")
-    parts_list = json.loads(parts) if isinstance(parts, str) else parts
-
-    body_text = ""
-    body_html = ""
-
-    # Try to get body from parts first (multipart emails)
-    if parts_list:
-        body_text = extract_body_from_parts(parts_list, "text/plain")
-        body_html = extract_body_from_parts(parts_list, "text/html")
-
-    # Fall back to direct body_data if no parts (single-part emails)
-    if not body_text and not body_html:
-        direct_body = body_data.get("body_data")
-        if direct_body:
-            decoded = decode_base64_body(direct_body)
-            # Use mime_type from raw email to determine body type
-            mime_type = row.get("mime_type", "text/plain")
-            if mime_type == "text/html":
-                body_html = decoded
-            else:
-                body_text = decoded
-
-    return ParsedEmail(
-        gmail_id=row["gmail_id"],
+    # Wrap in test structure with thread_id
+    return TestParsedEmail(
+        gmail_id=parsed.gmail_id,
         thread_id=row["thread_id"],
-        from_addr=from_addr,
-        to_addr=to_addr,
-        cc=cc,
-        bcc=bcc,
-        subject=subject,
-        date=date,
-        body_text=body_text,
-        body_html=body_html,
+        from_addr=parsed.from_addr,
+        to_addr=parsed.to_addrs[0] if parsed.to_addrs else "",
+        cc=parsed.cc_addrs,
+        bcc=parsed.bcc_addrs,
+        subject=parsed.subject,
+        date=parsed.date_header,
+        body_text=parsed.body_text,
+        body_html=parsed.body_html,
     )
 
 
-def validate_email(parsed: ParsedEmail, internal_date_ms: int) -> list[str]:
+def validate_email(parsed: TestParsedEmail, internal_date_ms: int) -> list[str]:
     """Check for issues with parsed email. Returns list of problems."""
     issues = []
 
@@ -124,9 +84,9 @@ def validate_email(parsed: ParsedEmail, internal_date_ms: int) -> list[str]:
     if not parsed.date:
         issues.append("MISSING date")
     else:
-        # Check date is in reasonable range (2020 to now + 1 day)
+        # Check date is in reasonable range (2020 to now + 5 minute grace period)
         min_date = datetime(2020, 1, 1, tzinfo=timezone.utc)
-        max_date = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59)
+        max_date = datetime.now(timezone.utc) + timedelta(minutes=5)
         if parsed.date < min_date:
             issues.append(f"DATE too old: {parsed.date}")
         elif parsed.date > max_date:

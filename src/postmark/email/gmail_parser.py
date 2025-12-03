@@ -55,13 +55,13 @@ def decode_mime_header(header_value: str | None) -> str:
 def extract_email_address(header_value: str | None) -> tuple[str, str]:
     """Extract email address and display name from header.
 
-    Returns (address, name) tuple.
+    Returns (address, name) tuple. Returns empty string for address if none found.
     """
     if not header_value:
         return ("", "")
     decoded = decode_mime_header(header_value)
     name, addr = parseaddr(decoded)
-    return (addr or decoded, name)
+    return (addr or "", name)
 
 
 def extract_email_address_only(header_value: str | None) -> str:
