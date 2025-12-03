@@ -1,0 +1,23 @@
+FROM python:3.13-slim
+
+WORKDIR /app
+
+# Install uv
+RUN pip install uv
+
+# Copy everything needed for build
+COPY pyproject.toml uv.lock README.md ./
+COPY src/ ./src/
+
+# Install dependencies (includes building the package)
+RUN uv sync --frozen --no-dev
+
+# Create data directory for DuckDB
+RUN mkdir -p /app/data
+
+VOLUME /app/data
+
+EXPOSE 8081
+
+# Run the DuckDB API server
+CMD ["uv", "run", "python", "-m", "postmark.services.duckdb_api"]

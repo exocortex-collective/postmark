@@ -94,7 +94,11 @@ def parse_date(header_value: str | None, internal_date_ms: int) -> datetime | No
     """Parse date from header, falling back to internal_date."""
     if header_value:
         try:
-            return parsedate_to_datetime(header_value)
+            dt = parsedate_to_datetime(header_value)
+            # Ensure timezone awareness
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
         except (ValueError, TypeError):
             pass
 
@@ -155,6 +159,9 @@ def parse_email(row: dict[str, Any], body_data: dict[str, Any]) -> ParsedEmail:
 
     from_addr = extract_email_address(get_header(headers, "From"))
     to_addr = extract_email_address(get_header(headers, "To"))
+    # Fall back to Delivered-To for BCC'd emails or undisclosed-recipients
+    if not to_addr or "undisclosed-recipients" in to_addr.lower():
+        to_addr = extract_email_address(get_header(headers, "Delivered-To"))
     cc = extract_email_list(get_header(headers, "Cc"))
     bcc = extract_email_address(get_header(headers, "Bcc"))
     subject = decode_mime_header(get_header(headers, "Subject"))
@@ -215,8 +222,7 @@ def validate_email(parsed: ParsedEmail, internal_date_ms: int) -> list[str]:
     elif "@" not in parsed.to_addr:
         issues.append(f"INVALID to_addr: {parsed.to_addr!r}")
 
-    if not parsed.subject:
-        issues.append("MISSING subject")
+    # Note: missing subject is valid - some emails have no subject
 
     if not parsed.date:
         issues.append("MISSING date")

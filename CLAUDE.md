@@ -8,6 +8,7 @@ Gmail integration layer for Cortex. Syncs email via GCP Pub/Sub push notificatio
 
 - **Spec**: `docs/project-spec.md`
 - **Main service**: `src/postmark/services/gmail_sync.py`
+- **DuckDB API**: `src/postmark/services/duckdb_api.py`
 - **Archived code**: `src/postmark/archive/` (Gmail takeout batch processing)
 
 ## Project Structure
@@ -15,15 +16,17 @@ Gmail integration layer for Cortex. Syncs email via GCP Pub/Sub push notificatio
 ```
 postmark/
 ├── src/postmark/
-│   ├── services/           # Main services (gmail_sync)
+│   ├── services/           # Main services (gmail_sync, duckdb_api)
 │   ├── storage/            # Postgres, S3, DuckDB clients
 │   ├── email/              # Parser, dedup, threading (reusable)
 │   └── archive/            # Archived takeout code
+├── scripts/                # Dev scripts (backfill.py, parse_test.py)
 ├── tests/
 ├── docs/
 │   └── project-spec.md     # Full specification
 ├── pyproject.toml
-└── Dockerfile
+├── Dockerfile              # gmail-sync service
+└── Dockerfile.duckdb-api   # DuckDB API service
 ```
 
 ## Key Dependencies
@@ -53,7 +56,10 @@ POSTGRES_DB=cortex
 POSTGRES_USER=cortex
 POSTGRES_PASSWORD=<secret>
 
-# DuckDB
+# DuckDB API (gmail-sync uses this URL)
+DUCKDB_API_URL=http://cortex-duckdb-api:8081
+
+# DuckDB (for duckdb-api service)
 DUCKDB_PATH=/app/data/emails.duckdb
 ```
 
@@ -76,10 +82,13 @@ uv run isort .
 
 ## Deployment
 
-- Docker image: `us-central1-docker.pkg.dev/cortex-gmail/cortex/postmark:latest`
-- Container: `cortex-gmail-sync` on Hades
-- Infrastructure: GCP resources managed in `cortex-infra` repo
-- CI/CD: GitHub Actions with Workload Identity Federation (keyless GCP auth)
+Two containers run together:
+- `cortex-duckdb-api` - DuckDB API server (holds write lock on DuckDB)
+- `cortex-gmail-sync` - Gmail sync service (connects to DuckDB API)
+
+Docker images: `us-central1-docker.pkg.dev/cortex-gmail/cortex/postmark:latest`
+Infrastructure: GCP resources managed in `cortex-infra` repo
+CI/CD: GitHub Actions with Workload Identity Federation (keyless GCP auth)
 
 ## Queue Interface
 

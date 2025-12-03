@@ -1,7 +1,12 @@
-"""Simple REST API for DuckDB email body queries."""
+"""REST API for DuckDB email body storage.
+
+Provides centralized read/write access to DuckDB, solving concurrency issues
+since DuckDB doesn't support multiple concurrent connections.
+"""
 
 import json
 import os
+import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -11,10 +16,28 @@ DUCKDB_PATH = os.environ.get("DUCKDB_PATH", "/app/data/emails.duckdb")
 HOST = os.environ.get("DUCKDB_API_HOST", "0.0.0.0")
 PORT = int(os.environ.get("DUCKDB_API_PORT", "8081"))
 
+# Single connection with lock for thread safety
+_conn: duckdb.DuckDBPyConnection | None = None
+_lock = threading.Lock()
+
 
 def get_connection() -> duckdb.DuckDBPyConnection:
-    """Get a read-only DuckDB connection."""
-    return duckdb.connect(DUCKDB_PATH, read_only=True)
+    """Get the singleton DuckDB connection."""
+    global _conn
+    if _conn is None:
+        _conn = duckdb.connect(DUCKDB_PATH)
+        # Ensure table exists
+        _conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS email_bodies (
+                gmail_id TEXT PRIMARY KEY,
+                parts JSON,
+                body_data TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """
+        )
+    return _conn
 
 
 class DuckDBHandler(BaseHTTPRequestHandler):
@@ -30,6 +53,57 @@ class DuckDBHandler(BaseHTTPRequestHandler):
     def _send_error(self, message: str, status: int = 400) -> None:
         """Send error response."""
         self._send_json({"error": message}, status)
+
+    def do_POST(self) -> None:
+        """Handle POST requests for writes."""
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/body":
+            # Store email body
+            try:
+                content_length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_length)
+                data = json.loads(body)
+
+                gmail_id = data.get("gmail_id")
+                parts = data.get("parts")
+                body_data = data.get("body_data")
+
+                if not gmail_id:
+                    self._send_error("Missing gmail_id")
+                    return
+
+                with _lock:
+                    conn = get_connection()
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO email_bodies (gmail_id, parts, body_data)
+                        VALUES (?, ?, ?)
+                        """,
+                        (gmail_id, json.dumps(parts) if parts else None, body_data),
+                    )
+
+                self._send_json({"status": "ok", "gmail_id": gmail_id}, 201)
+
+            except json.JSONDecodeError:
+                self._send_error("Invalid JSON")
+            except Exception as e:
+                self._send_error(str(e), 500)
+            return
+
+        if path == "/checkpoint":
+            # Force WAL checkpoint
+            try:
+                with _lock:
+                    conn = get_connection()
+                    conn.execute("CHECKPOINT")
+                self._send_json({"status": "ok"})
+            except Exception as e:
+                self._send_error(str(e), 500)
+            return
+
+        self._send_error("Not found", 404)
 
     def do_GET(self) -> None:
         """Handle GET requests."""
@@ -49,12 +123,12 @@ class DuckDBHandler(BaseHTTPRequestHandler):
                 return
 
             try:
-                conn = get_connection()
-                result = conn.execute(
-                    "SELECT parts, body_data FROM email_bodies WHERE gmail_id = ?",
-                    [gmail_id],
-                ).fetchone()
-                conn.close()
+                with _lock:
+                    conn = get_connection()
+                    result = conn.execute(
+                        "SELECT parts, body_data FROM email_bodies WHERE gmail_id = ?",
+                        [gmail_id],
+                    ).fetchone()
 
                 if result:
                     self._send_json(
@@ -85,13 +159,13 @@ class DuckDBHandler(BaseHTTPRequestHandler):
                 return
 
             try:
-                conn = get_connection()
-                placeholders = ",".join(["?" for _ in gmail_ids])
-                rows = conn.execute(
-                    f"SELECT gmail_id, parts, body_data FROM email_bodies WHERE gmail_id IN ({placeholders})",
-                    gmail_ids,
-                ).fetchall()
-                conn.close()
+                with _lock:
+                    conn = get_connection()
+                    placeholders = ",".join(["?" for _ in gmail_ids])
+                    rows = conn.execute(
+                        f"SELECT gmail_id, parts, body_data FROM email_bodies WHERE gmail_id IN ({placeholders})",
+                        gmail_ids,
+                    ).fetchall()
 
                 bodies = {
                     row[0]: {"parts": row[1], "body_data": row[2]} for row in rows
@@ -104,9 +178,9 @@ class DuckDBHandler(BaseHTTPRequestHandler):
 
         if path == "/stats":
             try:
-                conn = get_connection()
-                row = conn.execute("SELECT COUNT(*) FROM email_bodies").fetchone()
-                conn.close()
+                with _lock:
+                    conn = get_connection()
+                    row = conn.execute("SELECT COUNT(*) FROM email_bodies").fetchone()
                 count = row[0] if row else 0
                 self._send_json({"count": count})
             except Exception as e:
