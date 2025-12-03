@@ -27,6 +27,7 @@ from typing import Any
 import psycopg2
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -95,7 +96,7 @@ def fetch_and_store_body(gmail_service: Any, api_url: str, gmail_id: str) -> boo
         parts = payload.get("parts")
 
         return store_body_via_api(api_url, gmail_id, parts, body_data)
-    except Exception as e:
+    except HttpError as e:
         logger.error(f"Failed to fetch/store {gmail_id}: {e}")
         return False
 
@@ -138,71 +139,75 @@ def main() -> None:
         password=os.environ["POSTGRES_PASSWORD"],
     )
 
-    api_url = os.environ["DUCKDB_API_URL"]
+    try:
+        api_url = os.environ["DUCKDB_API_URL"]
 
-    # Get IDs from both sources
-    logger.info("Fetching gmail_ids from Postgres...")
-    postgres_ids = get_gmail_ids_in_postgres(pg_conn)
-    logger.info(f"Found {len(postgres_ids)} emails in Postgres")
+        # Get IDs from both sources
+        logger.info("Fetching gmail_ids from Postgres...")
+        postgres_ids = get_gmail_ids_in_postgres(pg_conn)
+        logger.info(f"Found {len(postgres_ids)} emails in Postgres")
 
-    logger.info("Fetching gmail_ids from DuckDB...")
-    duckdb_ids = get_gmail_ids_in_duckdb(api_url)
-    logger.info(f"Found {len(duckdb_ids)} bodies in DuckDB")
+        logger.info("Fetching gmail_ids from DuckDB...")
+        duckdb_ids = get_gmail_ids_in_duckdb(api_url)
+        logger.info(f"Found {len(duckdb_ids)} bodies in DuckDB")
 
-    # Find missing
-    missing_ids = postgres_ids - duckdb_ids
-    logger.info(f"Missing {len(missing_ids)} bodies in DuckDB")
+        # Find missing
+        missing_ids = postgres_ids - duckdb_ids
+        logger.info(f"Missing {len(missing_ids)} bodies in DuckDB")
 
-    if not missing_ids:
-        logger.info("Nothing to backfill!")
-        return
+        if not missing_ids:
+            logger.info("Nothing to backfill!")
+            return
 
-    if args.dry_run:
-        logger.info("Dry run - would backfill these gmail_ids:")
-        for gid in list(missing_ids)[:20]:
-            print(f"  {gid}")
-        if len(missing_ids) > 20:
-            print(f"  ... and {len(missing_ids) - 20} more")
-        return
+        if args.dry_run:
+            logger.info("Dry run - would backfill these gmail_ids:")
+            for gid in list(missing_ids)[:20]:
+                print(f"  {gid}")
+            if len(missing_ids) > 20:
+                print(f"  ... and {len(missing_ids) - 20} more")
+            return
 
-    # Initialize Gmail client
-    with open(os.environ["GMAIL_TOKEN_PATH"]) as f:
-        token_data = json.load(f)
+        # Initialize Gmail client
+        with open(os.environ["GMAIL_TOKEN_PATH"]) as f:
+            token_data = json.load(f)
 
-    creds = Credentials(
-        token=token_data["token"],
-        refresh_token=token_data["refresh_token"],
-        token_uri=token_data["token_uri"],
-        client_id=token_data["client_id"],
-        client_secret=token_data["client_secret"],
-        scopes=token_data["scopes"],
-    )
-    gmail = build("gmail", "v1", credentials=creds)
-    logger.info("Gmail client initialized")
+        creds = Credentials(
+            token=token_data["token"],
+            refresh_token=token_data["refresh_token"],
+            token_uri=token_data["token_uri"],
+            client_id=token_data["client_id"],
+            client_secret=token_data["client_secret"],
+            scopes=token_data["scopes"],
+        )
+        gmail = build("gmail", "v1", credentials=creds)
+        logger.info("Gmail client initialized")
 
-    # Process missing bodies
-    to_process = list(missing_ids)
-    if args.batch_size > 0:
-        to_process = to_process[: args.batch_size]
-        logger.info(f"Processing batch of {len(to_process)} (limited by --batch-size)")
-
-    success = 0
-    failed = 0
-
-    for i, gmail_id in enumerate(to_process):
-        if fetch_and_store_body(gmail, api_url, gmail_id):
-            success += 1
-        else:
-            failed += 1
-
-        if (i + 1) % 100 == 0:
+        # Process missing bodies
+        to_process = list(missing_ids)
+        if args.batch_size > 0:
+            to_process = to_process[: args.batch_size]
             logger.info(
-                f"Progress: {i + 1}/{len(to_process)} ({success} success, {failed} failed)"
+                f"Processing batch of {len(to_process)} (limited by --batch-size)"
             )
 
-    logger.info(f"Backfill complete: {success} success, {failed} failed")
+        success = 0
+        failed = 0
 
-    pg_conn.close()
+        for i, gmail_id in enumerate(to_process):
+            if fetch_and_store_body(gmail, api_url, gmail_id):
+                success += 1
+            else:
+                failed += 1
+
+            if (i + 1) % 100 == 0:
+                logger.info(
+                    f"Progress: {i + 1}/{len(to_process)} "
+                    f"({success} success, {failed} failed)"
+                )
+
+        logger.info(f"Backfill complete: {success} success, {failed} failed")
+    finally:
+        pg_conn.close()
 
 
 if __name__ == "__main__":
