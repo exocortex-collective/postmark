@@ -1,11 +1,11 @@
 """Gmail sync service - pulls from Pub/Sub, stores raw messages."""
 
-import base64
 import json
 import logging
 import os
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -24,26 +24,52 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class PostgresConfig:
+    """Postgres connection configuration."""
+
+    host: str
+    dbname: str
+    user: str
+    password: str
+    port: int = 5432
+
+
+@dataclass
+class GmailSyncConfig:
+    """Configuration for GmailSync service."""
+
+    project_id: str
+    subscription_path: str
+    topic_name: str
+    gmail_token_path: str
+    duckdb_path: str
+    postgres: PostgresConfig
+
+    @classmethod
+    def from_env(cls) -> "GmailSyncConfig":
+        """Load configuration from environment variables."""
+        return cls(
+            project_id=os.environ["GCP_PROJECT_ID"],
+            subscription_path=os.environ["PUBSUB_SUBSCRIPTION"],
+            topic_name=os.environ["PUBSUB_TOPIC"],
+            gmail_token_path=os.environ["GMAIL_TOKEN_PATH"],
+            duckdb_path=os.environ["DUCKDB_PATH"],
+            postgres=PostgresConfig(
+                host=os.environ["POSTGRES_HOST"],
+                port=int(os.environ.get("POSTGRES_PORT", "5432")),
+                dbname=os.environ["POSTGRES_DB"],
+                user=os.environ["POSTGRES_USER"],
+                password=os.environ["POSTGRES_PASSWORD"],
+            ),
+        )
+
+
 class GmailSync:
     """Main sync service."""
 
-    def __init__(self) -> None:
-        # Load config from environment
-        self.project_id = os.environ["GCP_PROJECT_ID"]
-        self.subscription_path = os.environ["PUBSUB_SUBSCRIPTION"]
-        self.topic_name = os.environ["PUBSUB_TOPIC"]
-        self.gmail_token_path = os.environ["GMAIL_TOKEN_PATH"]
-        self.gcp_credentials_path = os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
-        self.duckdb_path = os.environ["DUCKDB_PATH"]
-
-        # Postgres config
-        self.pg_config = {
-            "host": os.environ["POSTGRES_HOST"],
-            "port": int(os.environ.get("POSTGRES_PORT", "5432")),
-            "dbname": os.environ["POSTGRES_DB"],
-            "user": os.environ["POSTGRES_USER"],
-            "password": os.environ["POSTGRES_PASSWORD"],
-        }
+    def __init__(self, config: GmailSyncConfig) -> None:
+        self.config = config
 
         # Initialize clients
         self._init_gmail()
@@ -53,7 +79,7 @@ class GmailSync:
 
     def _init_gmail(self) -> None:
         """Initialize Gmail API client."""
-        with open(self.gmail_token_path) as f:
+        with open(self.config.gmail_token_path) as f:
             token_data = json.load(f)
 
         creds = Credentials(
@@ -70,11 +96,20 @@ class GmailSync:
     def _init_pubsub(self) -> None:
         """Initialize Pub/Sub subscriber."""
         self.subscriber = pubsub_v1.SubscriberClient()
-        logger.info(f"Pub/Sub subscriber initialized for {self.subscription_path}")
+        logger.info(
+            f"Pub/Sub subscriber initialized for {self.config.subscription_path}"
+        )
 
     def _init_postgres(self) -> None:
         """Initialize Postgres connection and ensure schema exists."""
-        self.pg_conn = psycopg2.connect(**self.pg_config)
+        pg = self.config.postgres
+        self.pg_conn = psycopg2.connect(
+            host=pg.host,
+            port=pg.port,
+            dbname=pg.dbname,
+            user=pg.user,
+            password=pg.password,
+        )
         self.pg_conn.autocommit = True
         self._ensure_postgres_schema()
         logger.info("Postgres connection initialized")
@@ -141,7 +176,7 @@ class GmailSync:
 
     def _init_duckdb(self) -> None:
         """Initialize DuckDB and ensure schema exists."""
-        self.duckdb_conn = duckdb.connect(self.duckdb_path)
+        self.duckdb_conn = duckdb.connect(self.config.duckdb_path)
         self.duckdb_conn.execute(
             """
             CREATE TABLE IF NOT EXISTS email_bodies (
@@ -152,7 +187,7 @@ class GmailSync:
             )
         """
         )
-        logger.info(f"DuckDB initialized at {self.duckdb_path}")
+        logger.info(f"DuckDB initialized at {self.config.duckdb_path}")
 
     def _get_last_history_id(self, email_address: str) -> str | None:
         """Get last synced history ID for an email address."""
@@ -201,19 +236,32 @@ class GmailSync:
         return attachment_ids
 
     def _strip_body(self, msg: dict[str, Any]) -> dict[str, Any]:
-        """Return message dict with body data stripped (for raw_response storage)."""
-        import copy
+        """Return message dict with body data stripped (for raw_response storage).
 
-        result = copy.deepcopy(msg)
+        Uses targeted copying to avoid deep copying the entire message.
+        Only the payload structure is copied; body.data fields are excluded.
+        """
 
-        def strip_body_data(part: dict[str, Any]) -> None:
-            if "body" in part and "data" in part["body"]:
-                del part["body"]["data"]
-            for subpart in part.get("parts", []):
-                strip_body_data(subpart)
+        def strip_part(part: dict[str, Any]) -> dict[str, Any]:
+            """Recursively copy a MIME part, excluding body.data."""
+            result: dict[str, Any] = {}
+            for key, value in part.items():
+                if key == "body":
+                    # Copy body without the data field
+                    result["body"] = {k: v for k, v in value.items() if k != "data"}
+                elif key == "parts":
+                    # Recursively strip nested parts
+                    result["parts"] = [strip_part(p) for p in value]
+                else:
+                    result[key] = value
+            return result
 
-        if "payload" in result:
-            strip_body_data(result["payload"])
+        result: dict[str, Any] = {}
+        for key, value in msg.items():
+            if key == "payload":
+                result["payload"] = strip_part(value)
+            else:
+                result[key] = value
         return result
 
     def store_raw_message(self, gmail_id: str) -> None:
@@ -352,6 +400,11 @@ class GmailSync:
             logger.exception(f"Error processing notification: {e}")
             message.nack()
 
+    def _get_current_user_email(self) -> str:
+        """Get the email address of the authenticated user."""
+        profile = self.gmail.users().getProfile(userId="me").execute()
+        return str(profile["emailAddress"])
+
     def renew_watch(self) -> None:
         """Renew Gmail push notification registration."""
         try:
@@ -360,7 +413,7 @@ class GmailSync:
                 .watch(
                     userId="me",
                     body={
-                        "topicName": self.topic_name,
+                        "topicName": self.config.topic_name,
                         "labelIds": ["INBOX"],
                         "labelFilterBehavior": "INCLUDE",
                     },
@@ -371,18 +424,23 @@ class GmailSync:
             expiration_ms = int(response["expiration"])
             expiration_dt = datetime.fromtimestamp(expiration_ms / 1000)
 
+            # Get the actual email address for this user
+            email_address = self._get_current_user_email()
+
             with self.pg_conn.cursor() as cur:
                 cur.execute(
                     """
-                    UPDATE sync_state SET watch_expiration = %s
-                    WHERE email_address = (
-                        SELECT email_address FROM sync_state LIMIT 1
-                    )
+                    INSERT INTO sync_state (email_address, last_history_id, watch_expiration)
+                    VALUES (%s, '', %s)
+                    ON CONFLICT (email_address)
+                    DO UPDATE SET watch_expiration = %s
                     """,
-                    (expiration_dt,),
+                    (email_address, expiration_dt, expiration_dt),
                 )
 
-            logger.info(f"Watch renewed, expires at {expiration_dt}")
+            logger.info(
+                f"Watch renewed for {email_address}, expires at {expiration_dt}"
+            )
 
         except Exception as e:
             logger.exception(f"Failed to renew watch: {e}")
@@ -417,9 +475,9 @@ class GmailSync:
 
         # Start Pub/Sub subscriber (blocks)
         streaming_pull_future = self.subscriber.subscribe(
-            self.subscription_path, callback=self.process_notification
+            self.config.subscription_path, callback=self.process_notification
         )
-        logger.info(f"Listening on {self.subscription_path}")
+        logger.info(f"Listening on {self.config.subscription_path}")
 
         try:
             streaming_pull_future.result()
@@ -431,7 +489,8 @@ class GmailSync:
 
 def main() -> None:
     """Entry point."""
-    sync = GmailSync()
+    config = GmailSyncConfig.from_env()
+    sync = GmailSync(config)
     sync.run()
 
 

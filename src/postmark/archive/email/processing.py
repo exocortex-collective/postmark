@@ -1,4 +1,4 @@
-import re
+import os
 import tempfile
 from pprint import pprint
 from sqlite3 import Connection
@@ -12,10 +12,13 @@ from postmark.storage.s3 import S3Client
 from postmark.storage.sqlite import write_attachment, write_dead_letter, write_email
 
 
-def sanitize_s3_key(key: str) -> str:
-    key = re.sub(r"(^[./]+|[./]+$)", "", key)
-    key = key.replace("..", "").replace("./", "").replace("/.", "")
-    return key
+def sanitize_s3_key(prefix: str, filename: str) -> str:
+    """Safely construct an S3 key by stripping directory info from filename.
+
+    Uses os.path.basename to prevent path traversal attacks from malicious filenames.
+    """
+    safe_filename = os.path.basename(filename)
+    return f"{prefix}/{safe_filename}"
 
 
 def process_email(
@@ -47,8 +50,8 @@ def process_email(
                     mime_type = attach.mime_type
                     payload = attach.payload
                     size = attach.size
-                    key = f"{parse_email_result.uuid}/{idx+1}/{name}"
-                    safe_key = sanitize_s3_key(key)
+                    prefix = f"{parse_email_result.uuid}/{idx+1}"
+                    safe_key = sanitize_s3_key(prefix, name)
                     s3_client.put_bytes(safe_key, payload)
                     write_attachment(
                         conn,
