@@ -90,6 +90,44 @@ Docker images: `us-central1-docker.pkg.dev/cortex-gmail/cortex/postmark:latest`
 Infrastructure: GCP resources managed in `cortex-infra` repo
 CI/CD: GitHub Actions with Workload Identity Federation (keyless GCP auth)
 
+### Portainer Stack Management
+
+The cortex-postmark stack is managed via Portainer on the **hades** endpoint (ID 11, 10.5.2.21:9001).
+
+**Important:** Use endpoint ID 11 (hades) for 10.5.2.21, NOT endpoint 3 (ares which is local).
+
+Portainer API: `https://localhost:9443`
+API key location: `~/HomeLab/.env` (PORTAINER_ACCESS_TOKEN)
+
+```bash
+# List stacks on hades
+curl -k -s 'https://localhost:9443/api/stacks' \
+  -H "X-API-Key: $PORTAINER_ACCESS_TOKEN" | jq '.[] | select(.EndpointId == 11)'
+
+# Create/update stack (use endpointId=11 for hades)
+curl -k -s -X POST 'https://localhost:9443/api/stacks/create/standalone/file?endpointId=11' \
+  -H "X-API-Key: $PORTAINER_ACCESS_TOKEN" \
+  -F 'Name=cortex-postmark' \
+  -F 'file=@docker-compose.yml'
+
+# Redeploy existing stack
+curl -k -s -X PUT 'https://localhost:9443/api/stacks/{id}?endpointId=11' \
+  -H "X-API-Key: $PORTAINER_ACCESS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"stackFileContent": "...", "pullImage": true}'
+
+# Stop/start stack
+curl -k -s -X POST 'https://localhost:9443/api/stacks/{id}/stop?endpointId=11' \
+  -H "X-API-Key: $PORTAINER_ACCESS_TOKEN"
+curl -k -s -X POST 'https://localhost:9443/api/stacks/{id}/start?endpointId=11' \
+  -H "X-API-Key: $PORTAINER_ACCESS_TOKEN"
+```
+
+**Registry Authentication:** GCP Artifact Registry is configured in Portainer (registry ID 1). Ensure docker is authenticated on the target host before Portainer can pull:
+```bash
+ssh devon@10.5.2.21 "cat /home/devon/cortex-secrets/gcp-service-account.json | docker login -u _json_key --password-stdin https://us-central1-docker.pkg.dev"
+```
+
 ## Queue Interface
 
 Postmark enqueues new emails for downstream processing:
