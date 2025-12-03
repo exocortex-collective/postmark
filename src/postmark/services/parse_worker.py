@@ -14,7 +14,7 @@ import psycopg2
 from psycopg2.extras import Json
 
 from postmark.email.gmail_parser import ParsedEmail, parse_gmail_message
-from postmark.storage.duckdb_client import get_body_data
+from postmark.storage.duckdb_client import get_body_data_from_api
 
 logging.basicConfig(
     level=logging.INFO,
@@ -246,7 +246,7 @@ class ParseWorker:
                 return False
 
             # Get body data from DuckDB API
-            body_data = get_body_data(self.config.duckdb_api_url, gmail_id)
+            body_data = get_body_data_from_api(self.config.duckdb_api_url, gmail_id)
 
             # Parse email
             parsed = parse_gmail_message(raw, body_data)

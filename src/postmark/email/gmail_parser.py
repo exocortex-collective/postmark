@@ -184,9 +184,8 @@ def parse_gmail_message(raw: dict[str, Any], body_data: dict[str, Any]) -> Parse
     in_reply_to = get_header(headers, "In-Reply-To") or ""
     references = parse_references(get_header(headers, "References"))
 
-    # Extract body from DuckDB data (API returns parsed JSON)
-    parts = body_data.get("parts")
-    parts_list = json.loads(parts) if isinstance(parts, str) else parts
+    # Extract body from DuckDB data (both API and local return parsed JSON)
+    parts_list = body_data.get("parts")
 
     body_text = ""
     body_html = ""

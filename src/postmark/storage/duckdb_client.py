@@ -51,6 +51,7 @@ def get_body_data_from_local(duck_conn: Any, gmail_id: str) -> dict[str, Any]:
 
     Returns:
         Dict with 'parts' and 'body_data' keys. Values are None if not found.
+        Parts are parsed from JSON for consistency with API response.
     """
     if duck_conn is None:
         return {"parts": None, "body_data": None}
@@ -59,11 +60,7 @@ def get_body_data_from_local(duck_conn: Any, gmail_id: str) -> dict[str, Any]:
         [gmail_id],
     ).fetchone()
     if result:
-        return {"parts": result[0], "body_data": result[1]}
+        # Parse JSON parts for consistency with API response
+        parts_data = json.loads(result[0]) if result[0] else None
+        return {"parts": parts_data, "body_data": result[1]}
     return {"parts": None, "body_data": None}
-
-
-# Alias for backward compatibility with parse_worker
-def get_body_data(duckdb_api_url: str, gmail_id: str) -> dict[str, Any]:
-    """Fetch body data from DuckDB API (alias for get_body_data_from_api)."""
-    return get_body_data_from_api(duckdb_api_url, gmail_id)

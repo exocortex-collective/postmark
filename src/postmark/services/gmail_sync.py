@@ -8,7 +8,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import psycopg2
@@ -479,8 +479,6 @@ class GmailSync:
         Returns:
             Tuple of (stored_count, skipped_count)
         """
-        from datetime import datetime, timedelta
-
         if after:
             # Parse absolute date with validation
             try:
