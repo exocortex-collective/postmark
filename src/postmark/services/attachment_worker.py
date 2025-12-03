@@ -9,7 +9,7 @@ import os
 import signal
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import boto3
@@ -33,12 +33,13 @@ class Config:
     postgres_port: int
     postgres_db: str
     postgres_user: str
-    postgres_password: str
     s3_endpoint: str
     s3_bucket: str
-    s3_access_key: str
-    s3_secret_key: str
     gmail_token_path: str
+    # Sensitive fields hidden from repr
+    postgres_password: str = field(default="", repr=False)
+    s3_access_key: str = field(default="", repr=False)
+    s3_secret_key: str = field(default="", repr=False)
     batch_size: int = 50
     poll_interval: int = 5
 
@@ -74,9 +75,13 @@ class AttachmentWorker:
             # Ensure bucket exists
             try:
                 self._s3_client.head_bucket(Bucket=self.config.s3_bucket)
-            except ClientError:
-                logger.info(f"Creating bucket: {self.config.s3_bucket}")
-                self._s3_client.create_bucket(Bucket=self.config.s3_bucket)
+            except ClientError as e:
+                # 404 means bucket doesn't exist, other errors should propagate
+                if e.response.get("Error", {}).get("Code") == "404":
+                    logger.info(f"Creating bucket: {self.config.s3_bucket}")
+                    self._s3_client.create_bucket(Bucket=self.config.s3_bucket)
+                else:
+                    raise
         return self._s3_client
 
     def _get_gmail_service(self) -> Resource:
@@ -263,8 +268,9 @@ class AttachmentWorker:
             )
 
             # Decode base64url data
-            # Gmail API returns base64url without padding - add it for safe decoding
-            data = base64.urlsafe_b64decode(att_response["data"] + "==")
+            # Gmail API returns base64url without padding - add correct padding
+            raw_data = att_response["data"]
+            data = base64.urlsafe_b64decode(raw_data + "=" * (-len(raw_data) % 4))
 
             # Generate S3 key: attachments/{gmail_id}/{attachment_id}/{filename}
             # Sanitize filename to prevent path traversal attacks
