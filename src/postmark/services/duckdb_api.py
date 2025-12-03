@@ -119,9 +119,11 @@ def get_body(
             status_code=404, detail=f"No body found for gmail_id: {gmail_id}"
         )
 
+    # Deserialize JSON parts for cleaner API response
+    parts_data = json.loads(result[0]) if result[0] else None
     return BodyResponse(
         gmail_id=gmail_id,
-        parts=result[0],
+        parts=parts_data,
         body_data=result[1],
     )
 
@@ -143,7 +145,14 @@ def get_bodies(
             id_list,
         ).fetchall()
 
-    bodies = {row[0]: {"parts": row[1], "body_data": row[2]} for row in rows}
+    # Deserialize JSON parts for cleaner API response
+    bodies = {
+        row[0]: {
+            "parts": json.loads(row[1]) if row[1] else None,
+            "body_data": row[2],
+        }
+        for row in rows
+    }
     return BodiesResponse(bodies=bodies)
 
 

@@ -10,5 +10,8 @@ wheels/
 .venv
 .aider*
 
+# Environment files (use .env.template)
+.env
+
 # Docker cruft
 minio-data/

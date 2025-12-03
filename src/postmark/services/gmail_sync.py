@@ -534,9 +534,7 @@ class GmailSync:
                 self.store_raw_message(gmail_id)
                 stored += 1
 
-                # Track the historyId from this message for baseline update
-                # We need to fetch it since store_raw_message doesn't return it
-                # Actually, the message was just fetched - let's modify to track it
+                # TODO: Could optimize by having store_raw_message return historyId
                 if stored % 50 == 0:
                     logger.info(f"Progress: stored {stored}, skipped {skipped}")
 

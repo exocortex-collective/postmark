@@ -2,6 +2,8 @@
 """Parse worker service - processes raw emails from queue into structured data."""
 
 import argparse
+import base64
+import binascii
 import json
 import logging
 import os
@@ -131,12 +133,10 @@ def decode_base64_body(data: str | None) -> str:
     if not data:
         return ""
     try:
-        import base64
-
         # Gmail uses URL-safe base64
         decoded = base64.urlsafe_b64decode(data + "==")
         return decoded.decode("utf-8", errors="replace")
-    except Exception:
+    except (binascii.Error, ValueError, UnicodeDecodeError):
         return ""
 
 
@@ -204,12 +204,9 @@ def parse_email(raw: dict[str, Any], body_data: dict[str, Any]) -> ParsedEmail:
     in_reply_to = get_header(headers, "In-Reply-To") or ""
     references = parse_references(get_header(headers, "References"))
 
-    # Extract body from DuckDB data
+    # Extract body from DuckDB data (API returns parsed JSON)
     parts = body_data.get("parts")
-    if parts:
-        parts_list = json.loads(parts) if isinstance(parts, str) else parts
-    else:
-        parts_list = None
+    parts_list = json.loads(parts) if isinstance(parts, str) else parts
 
     body_text = ""
     body_html = ""
@@ -560,13 +557,27 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # All config from environment - use .env.template as reference
+    required_vars = [
+        "POSTGRES_HOST",
+        "POSTGRES_DB",
+        "POSTGRES_USER",
+        "POSTGRES_PASSWORD",
+        "DUCKDB_API_URL",
+    ]
+    missing = [v for v in required_vars if not os.environ.get(v)]
+    if missing:
+        logger.error(f"Missing required environment variables: {', '.join(missing)}")
+        logger.error("See .env.template for required configuration")
+        sys.exit(1)
+
     config = Config(
-        postgres_host=os.environ.get("POSTGRES_HOST", "10.5.2.21"),
+        postgres_host=os.environ["POSTGRES_HOST"],
         postgres_port=int(os.environ.get("POSTGRES_PORT", "5432")),
-        postgres_db=os.environ.get("POSTGRES_DB", "cortex"),
-        postgres_user=os.environ.get("POSTGRES_USER", "cortex"),
-        postgres_password=os.environ.get("POSTGRES_PASSWORD", "cortex"),
-        duckdb_api_url=os.environ.get("DUCKDB_API_URL", "http://10.5.2.21:8081"),
+        postgres_db=os.environ["POSTGRES_DB"],
+        postgres_user=os.environ["POSTGRES_USER"],
+        postgres_password=os.environ["POSTGRES_PASSWORD"],
+        duckdb_api_url=os.environ["DUCKDB_API_URL"],
         batch_size=args.batch_size,
     )
 

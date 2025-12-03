@@ -50,7 +50,7 @@ PUBSUB_SUBSCRIPTION=projects/cortex-gmail/subscriptions/gmail-sync
 PUBSUB_TOPIC=projects/cortex-gmail/topics/gmail-events
 
 # Postgres
-POSTGRES_HOST=10.5.2.21
+POSTGRES_HOST=<your-postgres-host>
 POSTGRES_PORT=5432
 POSTGRES_DB=cortex
 POSTGRES_USER=cortex

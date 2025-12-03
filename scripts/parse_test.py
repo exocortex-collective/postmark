@@ -2,9 +2,11 @@
 """Test email parsing against live data - iterate until all emails parse cleanly."""
 
 import base64
+import binascii
 import json
 import os
 import re
+import traceback
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,13 +16,15 @@ from typing import Any
 
 import psycopg2
 
-# Configuration from environment variables
-POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "10.5.2.21")
-POSTGRES_DB = os.environ.get("POSTGRES_DB", "cortex")
-POSTGRES_USER = os.environ.get("POSTGRES_USER", "cortex")
+# Configuration - all required from environment (use .env.template as reference)
+POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "")
+POSTGRES_DB = os.environ.get("POSTGRES_DB", "")
+POSTGRES_USER = os.environ.get("POSTGRES_USER", "")
 POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "")
-DUCKDB_API_URL = os.environ.get("DUCKDB_API_URL")  # e.g., "http://10.5.2.21:8081"
-DUCKDB_LOCAL_PATH = os.environ.get("DUCKDB_PATH", "/tmp/cortex-data/emails.duckdb")
+DUCKDB_API_URL = os.environ.get(
+    "DUCKDB_API_URL"
+)  # Set for remote API, or use DUCKDB_PATH for local
+DUCKDB_LOCAL_PATH = os.environ.get("DUCKDB_PATH", "")
 
 
 @dataclass
@@ -105,7 +109,7 @@ def decode_base64_body(data: str | None) -> str:
         # Gmail uses URL-safe base64
         decoded = base64.urlsafe_b64decode(data + "==")
         return decoded.decode("utf-8", errors="replace")
-    except Exception:
+    except (binascii.Error, ValueError, UnicodeDecodeError):
         return ""
 
 
@@ -156,12 +160,9 @@ def parse_email(row: dict[str, Any], body_data: dict[str, Any]) -> ParsedEmail:
     subject = decode_mime_header(get_header(headers, "Subject"))
     date = parse_date(get_header(headers, "Date"), row["internal_date"])
 
-    # Extract body from DuckDB data
+    # Extract body from DuckDB data (API returns parsed JSON, local may return string)
     parts = body_data.get("parts")
-    if parts:
-        parts_list = json.loads(parts) if isinstance(parts, str) else parts
-    else:
-        parts_list = None
+    parts_list = json.loads(parts) if isinstance(parts, str) else parts
 
     body_text = ""
     body_html = ""
@@ -311,8 +312,15 @@ def _run_tests(pg_conn: Any, duck_conn: Any) -> None:
 
     print(f"Processing {len(rows)} emails...\n")
 
+    # Track issues and stats in a single pass
     total_issues = 0
     emails_with_issues = 0
+    has_text_only = 0
+    has_html_only = 0
+    has_both = 0
+    has_cc = 0
+    from_domains: dict[str, int] = {}
+    dates: list[datetime] = []
 
     for row in rows:
         body_data = get_body_data(row["gmail_id"], duck_conn)
@@ -320,6 +328,24 @@ def _run_tests(pg_conn: Any, duck_conn: Any) -> None:
         try:
             parsed = parse_email(row, body_data)
             issues = validate_email(parsed, row["internal_date"])
+
+            # Collect stats during validation pass
+            if parsed.body_text and parsed.body_html:
+                has_both += 1
+            elif parsed.body_text:
+                has_text_only += 1
+            elif parsed.body_html:
+                has_html_only += 1
+
+            if parsed.cc:
+                has_cc += 1
+
+            if parsed.from_addr and "@" in parsed.from_addr:
+                domain = parsed.from_addr.split("@")[1].lower()
+                from_domains[domain] = from_domains.get(domain, 0) + 1
+
+            if parsed.date:
+                dates.append(parsed.date)
 
             if issues:
                 emails_with_issues += 1
@@ -339,8 +365,6 @@ def _run_tests(pg_conn: Any, duck_conn: Any) -> None:
             emails_with_issues += 1
             total_issues += 1
             print(f"💥 {row['gmail_id'][:12]}... | PARSE ERROR: {e}")
-            import traceback
-
             traceback.print_exc()
             print()
 
@@ -349,42 +373,14 @@ def _run_tests(pg_conn: Any, duck_conn: Any) -> None:
         f"Summary: {len(rows)} emails, {emails_with_issues} with issues, {total_issues} total issues"
     )
 
-    # Collect stats
-    has_text_only = 0
-    has_html_only = 0
-    has_both = 0
-    has_cc = 0
-    from_domains: dict[str, int] = {}
-    dates: list[datetime] = []
-
-    for row in rows:
-        body_data = get_body_data(row["gmail_id"], duck_conn)
-        parsed = parse_email(row, body_data)
-
-        if parsed.body_text and parsed.body_html:
-            has_both += 1
-        elif parsed.body_text:
-            has_text_only += 1
-        elif parsed.body_html:
-            has_html_only += 1
-
-        if parsed.cc:
-            has_cc += 1
-
-        if parsed.from_addr and "@" in parsed.from_addr:
-            domain = parsed.from_addr.split("@")[1].lower()
-            from_domains[domain] = from_domains.get(domain, 0) + 1
-
-        if parsed.date:
-            dates.append(parsed.date)
-
     print(f"\n{'='*60}")
     print("Statistics:\n")
     print(
         f"Body types: {has_text_only} text-only, {has_html_only} html-only, {has_both} both"
     )
     print(f"Emails with CC: {has_cc}")
-    print(f"Date range: {min(dates)} to {max(dates)}")
+    if dates:
+        print(f"Date range: {min(dates)} to {max(dates)}")
     print(f"\nTop sender domains:")
     for domain, count in sorted(from_domains.items(), key=lambda x: -x[1])[:10]:
         print(f"  {domain}: {count}")

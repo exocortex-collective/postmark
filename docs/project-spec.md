@@ -232,8 +232,8 @@ GCP_PROJECT_ID=cortex-gmail
 PUBSUB_SUBSCRIPTION=projects/cortex-gmail/subscriptions/gmail-sync
 PUBSUB_TOPIC=projects/cortex-gmail/topics/gmail-events
 
-# Postgres (on Hades)
-POSTGRES_HOST=10.5.2.21
+# Postgres
+POSTGRES_HOST=${POSTGRES_HOST}
 POSTGRES_PORT=5432
 POSTGRES_DB=cortex
 POSTGRES_USER=cortex
@@ -463,7 +463,7 @@ services:
       - GCP_PROJECT_ID=cortex-gmail
       - PUBSUB_SUBSCRIPTION=projects/cortex-gmail/subscriptions/gmail-sync
       - PUBSUB_TOPIC=projects/cortex-gmail/topics/gmail-events
-      - POSTGRES_HOST=10.5.2.21
+      - POSTGRES_HOST=${POSTGRES_HOST}
       - POSTGRES_PORT=5432
       - POSTGRES_DB=cortex
       - POSTGRES_USER=cortex
