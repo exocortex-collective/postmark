@@ -4,6 +4,8 @@ Gmail integration layer for Cortex. Syncs email via GCP Pub/Sub push notificatio
 
 **Single-user homelab deployment only.** One instance = one Gmail account. See `docs/project-spec.md` for design philosophy.
 
+**Scale assumption:** The target Gmail account has ~70GB of mail (millions of messages). Design for this scale - avoid loading entire datasets into memory, use pagination/streaming where appropriate.
+
 ## Quick Reference
 
 - **Spec**: `docs/project-spec.md`
