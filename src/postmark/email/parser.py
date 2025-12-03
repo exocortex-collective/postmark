@@ -68,7 +68,7 @@ def strip_non_text_attachments(msg: Message) -> EmailMessage:
     new_msg = EmailMessage()
     for k, v in msg.items():
         v_str = str(v)
-        v_str = v_str.replace('\r', ' ').replace('\n', ' ')
+        v_str = v_str.replace("\r", " ").replace("\n", " ")
         new_msg[k] = v_str
     parts = msg.iter_parts() if hasattr(msg, "iter_parts") else msg.walk()
     for part in parts:
@@ -78,7 +78,7 @@ def strip_non_text_attachments(msg: Message) -> EmailMessage:
                 em = EmailMessage()
                 for k, v in part.items():
                     v_str = str(v)
-                    v_str = v_str.replace('\r', ' ').replace('\n', ' ')
+                    v_str = v_str.replace("\r", " ").replace("\n", " ")
                     em[k] = v_str
                 payload = part.get_payload(decode=True)
                 if isinstance(payload, bytes):
