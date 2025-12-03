@@ -45,7 +45,7 @@ class BloomFilter:
 
 
 def fuzzy_equal(a: str, b: str, threshold: float = 0.95) -> bool:
-    return lev_ratio(a, b) >= threshold
+    return bool(lev_ratio(a, b) >= threshold)
 
 
 def should_store(

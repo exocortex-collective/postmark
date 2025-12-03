@@ -1,8 +1,8 @@
 import datetime
 from typing import Optional
 
+from postmark.archive.threading import detect_thread
 from postmark.email.parser import Email
-from postmark.email.threading import detect_thread
 
 
 def fake_resolver(key: str) -> Optional[Email]:
@@ -21,6 +21,7 @@ def fake_resolver(key: str) -> Optional[Email]:
             from_addr="someone@example.com",
             body_text="Parent body",
             body_html="",
+            raw_msg=b"",
             # You might store thread_id on an Email
             # or store it in a separate data structure
         )
@@ -43,6 +44,7 @@ def fake_resolver(key: str) -> Optional[Email]:
             from_addr="other@example.com",
             body_text="Sibling body",
             body_html="",
+            raw_msg=b"",
         )
         # Return sibling only if it's within [start_dt, end_dt]
         date = sibling_email.date
@@ -62,6 +64,7 @@ def test_detect_thread_in_reply_to() -> None:
         from_addr="someone@example.com",
         body_text="Child body",
         body_html="",
+        raw_msg=b"",
     )
     # Set a fake in_reply_to
     setattr(child_email, "in_reply_to", "<parent.1@example.com>")
@@ -78,6 +81,7 @@ def test_detect_thread_fallback_subject() -> None:
         from_addr="someone@example.com",
         body_text="Testing fallback with same subject",
         body_html="",
+        raw_msg=b"",
     )
     # No references set, so it hits subject fallback
     thread_id = detect_thread(fallback_email, fake_resolver)
@@ -94,6 +98,7 @@ def test_detect_thread_new() -> None:
         from_addr="someone@example.com",
         body_text="Old subject line, but too far in time",
         body_html="",
+        raw_msg=b"",
     )
     # This time difference is out of the 7-day window, so no subject-based match
     thread_id = detect_thread(new_email, fake_resolver)

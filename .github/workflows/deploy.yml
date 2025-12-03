@@ -1,0 +1,31 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag to deploy (default: latest)'
+        required: false
+        default: 'latest'
+
+env:
+  IMAGE_NAME: us-central1-docker.pkg.dev/cortex-gmail/cortex/postmark
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy notification
+        run: |
+          echo "Deployment triggered for $IMAGE_NAME:${{ github.event.inputs.tag }}"
+          echo ""
+          echo "To deploy on Hades, run:"
+          echo ""
+          echo "  docker pull $IMAGE_NAME:${{ github.event.inputs.tag }}"
+          echo "  docker stop cortex-gmail-sync"
+          echo "  docker rm cortex-gmail-sync"
+          echo "  # Then recreate with docker run (see deploy script)"
+          echo ""
+          echo "Or use the deploy script:"
+          echo "  ~/cortex-scripts/deploy-postmark.sh ${{ github.event.inputs.tag }}"

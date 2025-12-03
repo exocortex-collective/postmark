@@ -1,7 +1,7 @@
 # Postmark Email DataStore Specification
 
-> **Update**: Current Gmail exports arrive as a single `.gz` file containing one `.mbox` file. 
-> Our backfill command reads directly from this `.gz` stream instead of multiple `.eml` files 
+> **Update**: Current Gmail exports arrive as a single `.gz` file containing one `.mbox` file.
+> Our backfill command reads directly from this `.gz` stream instead of multiple `.eml` files
 > packed into a gzip archive.
 
 ## Project Overview
@@ -224,7 +224,7 @@ deduplication:
   enabled: true
   threshold: 0.95
   bloom_filter_size: 100000000
-  
+
 normalization:
   strip_html: true
   normalize_whitespace: true
@@ -259,12 +259,12 @@ error_handling:
 server:
   port: 8080
   max_connections: 20
-  
+
 query_limits:
   default_page_size: 20
   max_page_size: 100
   body_truncate_length: 5000
-  
+
 cache:
   enabled: true
   ttl: 300
@@ -274,7 +274,7 @@ cache:
 
 ### Bulk Loader
 
-1. **Failed Emails**: 
+1. **Failed Emails**:
    - Write to dead letter queue with .gz offset
    - Continue processing (unless --fail-fast)
    - Generate error report: `failed_emails_{timestamp}.jsonl`
@@ -439,7 +439,7 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     command: server /data
-    
+
   prometheus:
     image: prom/prometheus
     volumes:

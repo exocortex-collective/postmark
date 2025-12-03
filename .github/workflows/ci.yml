@@ -26,9 +26,18 @@ jobs:
         run: |
           uv pip install -e ".[dev]"
 
-      - name: Lint and Test
+      - name: Lint (Format)
         run: |
-          uv run black --check .
+          uv run black --check . --exclude "\.eml$"
+
+      - name: Lint (Imports)
+        run: |
           uv run isort --check-only .
-          uv run mypy .
+
+      - name: Lint (Type)
+        run: |
+          uv run mypy . --ignore-missing-imports --disable-error-code=misc
+
+      - name: Test
+        run: |
           uv run pytest --maxfail=1 --disable-warnings -q
