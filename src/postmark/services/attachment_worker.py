@@ -15,6 +15,7 @@ from typing import Any
 import boto3
 import psycopg2
 from botocore.config import Config as BotoConfig
+from botocore.exceptions import ClientError
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -73,7 +74,7 @@ class AttachmentWorker:
             # Ensure bucket exists
             try:
                 self._s3_client.head_bucket(Bucket=self.config.s3_bucket)
-            except Exception:
+            except ClientError:
                 logger.info(f"Creating bucket: {self.config.s3_bucket}")
                 self._s3_client.create_bucket(Bucket=self.config.s3_bucket)
         return self._s3_client
@@ -296,7 +297,9 @@ class AttachmentWorker:
             data = base64.urlsafe_b64decode(att_response["data"])
 
             # Generate S3 key: attachments/{gmail_id}/{attachment_id}/{filename}
-            filename = metadata["filename"] or "attachment"
+            # Sanitize filename to prevent path traversal attacks
+            raw_filename = metadata["filename"] or "attachment"
+            filename = os.path.basename(raw_filename)
             s3_key = f"attachments/{gmail_id}/{attachment_id}/{filename}"
 
             # Upload to S3/Minio
