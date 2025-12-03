@@ -177,7 +177,10 @@ class GmailSync:
     def _store_body_via_api(
         self, gmail_id: str, parts: list[Any] | None, body_data: str | None
     ) -> None:
-        """Store email body via DuckDB API."""
+        """Store email body via DuckDB API.
+
+        Raises on failure to allow caller to nack Pub/Sub message for retry.
+        """
         data = json.dumps(
             {"gmail_id": gmail_id, "parts": parts, "body_data": body_data}
         ).encode()
@@ -192,9 +195,16 @@ class GmailSync:
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 if resp.status != 201:
-                    logger.error(f"DuckDB API returned {resp.status} for {gmail_id}")
+                    error_body = resp.read().decode(errors="ignore")
+                    logger.error(
+                        f"DuckDB API returned {resp.status} for {gmail_id}: {error_body}"
+                    )
+                    raise RuntimeError(
+                        f"DuckDB API returned {resp.status} for {gmail_id}"
+                    )
         except (urllib.error.URLError, TimeoutError) as e:
             logger.error(f"Failed to store body for {gmail_id}: {e}")
+            raise
 
     def _get_last_history_id(self, email_address: str) -> str | None:
         """Get last synced history ID for an email address."""

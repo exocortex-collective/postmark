@@ -21,7 +21,13 @@ def get_body_data_from_api(api_url: str, gmail_id: str) -> dict[str, Any]:
         gmail_id: Gmail message ID to fetch body for
 
     Returns:
-        Dict with 'parts' and 'body_data' keys. Values are None if not found.
+        Dict with 'parts' and 'body_data' keys. Values are None if not found (404).
+
+    Raises:
+        urllib.error.HTTPError: For non-404 HTTP errors
+        urllib.error.URLError: For network errors
+        TimeoutError: For request timeouts
+        json.JSONDecodeError: For invalid JSON responses
     """
     url = f"{api_url}/body?gmail_id={gmail_id}"
     try:
@@ -33,13 +39,13 @@ def get_body_data_from_api(api_url: str, gmail_id: str) -> dict[str, Any]:
             # Not found is expected for missing bodies
             return {"parts": None, "body_data": None}
         logger.warning(f"HTTP error fetching body for {gmail_id}: {e}")
-        return {"parts": None, "body_data": None}
+        raise
     except (urllib.error.URLError, TimeoutError) as e:
         logger.warning(f"Network error fetching body for {gmail_id}: {e}")
-        return {"parts": None, "body_data": None}
+        raise
     except json.JSONDecodeError as e:
         logger.warning(f"Invalid JSON response for {gmail_id}: {e}")
-        return {"parts": None, "body_data": None}
+        raise
 
 
 def get_body_data_from_local(duck_conn: Any, gmail_id: str) -> dict[str, Any]:
