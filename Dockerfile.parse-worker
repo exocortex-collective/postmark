@@ -1,0 +1,25 @@
+FROM python:3.13-slim
+
+WORKDIR /app
+
+# Create a non-root user
+RUN useradd -m appuser
+
+# Install uv
+RUN pip install uv
+
+# Copy everything needed for build
+COPY pyproject.toml uv.lock README.md ./
+COPY src/ ./src/
+
+# Install dependencies (includes building the package)
+RUN uv sync --frozen --no-dev
+
+# Change ownership of the app directory
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Run the parse worker
+CMD ["uv", "run", "python", "-m", "postmark.services.parse_worker"]

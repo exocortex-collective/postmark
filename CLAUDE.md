@@ -8,6 +8,7 @@ Gmail integration layer for Cortex. Syncs email via GCP Pub/Sub push notificatio
 
 - **Spec**: `docs/project-spec.md`
 - **Main service**: `src/postmark/services/gmail_sync.py`
+- **DuckDB API**: `src/postmark/services/duckdb_api.py`
 - **Archived code**: `src/postmark/archive/` (Gmail takeout batch processing)
 
 ## Project Structure
@@ -15,15 +16,17 @@ Gmail integration layer for Cortex. Syncs email via GCP Pub/Sub push notificatio
 ```
 postmark/
 ├── src/postmark/
-│   ├── services/           # Main services (gmail_sync)
+│   ├── services/           # Main services (gmail_sync, duckdb_api)
 │   ├── storage/            # Postgres, S3, DuckDB clients
 │   ├── email/              # Parser, dedup, threading (reusable)
 │   └── archive/            # Archived takeout code
+├── scripts/                # Dev scripts (backfill.py, parse_test.py)
 ├── tests/
 ├── docs/
 │   └── project-spec.md     # Full specification
 ├── pyproject.toml
-└── Dockerfile
+├── Dockerfile              # gmail-sync service
+└── Dockerfile.duckdb-api   # DuckDB API service
 ```
 
 ## Key Dependencies
@@ -47,13 +50,16 @@ PUBSUB_SUBSCRIPTION=projects/cortex-gmail/subscriptions/gmail-sync
 PUBSUB_TOPIC=projects/cortex-gmail/topics/gmail-events
 
 # Postgres
-POSTGRES_HOST=10.5.2.21
+POSTGRES_HOST=<your-postgres-host>
 POSTGRES_PORT=5432
 POSTGRES_DB=cortex
 POSTGRES_USER=cortex
 POSTGRES_PASSWORD=<secret>
 
-# DuckDB
+# DuckDB API (gmail-sync uses this URL)
+DUCKDB_API_URL=http://cortex-duckdb-api:8081
+
+# DuckDB (for duckdb-api service)
 DUCKDB_PATH=/app/data/emails.duckdb
 ```
 
@@ -76,10 +82,13 @@ uv run isort .
 
 ## Deployment
 
-- Docker image: `us-central1-docker.pkg.dev/cortex-gmail/cortex/postmark:latest`
-- Container: `cortex-gmail-sync` on Hades
-- Infrastructure: GCP resources managed in `cortex-infra` repo
-- CI/CD: GitHub Actions with Workload Identity Federation (keyless GCP auth)
+Two containers run together:
+- `cortex-duckdb-api` - DuckDB API server (holds write lock on DuckDB)
+- `cortex-gmail-sync` - Gmail sync service (connects to DuckDB API)
+
+Docker images: `us-central1-docker.pkg.dev/cortex-gmail/cortex/postmark:latest`
+Infrastructure: GCP resources managed in `cortex-infra` repo
+CI/CD: GitHub Actions with Workload Identity Federation (keyless GCP auth)
 
 ## Queue Interface
 
@@ -103,3 +112,26 @@ From archived code, still in use:
 
 - **Gemini Code Assist**: Automatic code review on PRs
 - **Renovate**: Automated dependency updates
+
+## Code Review Workflow
+
+When checking PR reviews, only fetch **unresolved** comments - resolved conversations indicate completed items:
+
+```bash
+# Get unresolved review threads
+gh api graphql -f query='
+query($owner: String!, $repo: String!, $pr: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $pr) {
+      reviewThreads(first: 100) {
+        nodes {
+          isResolved
+          comments(first: 10) {
+            nodes { body path line }
+          }
+        }
+      }
+    }
+  }
+}' -f owner=devonjones -f repo=postmark -F pr=24 --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)'
+```

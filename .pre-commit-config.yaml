@@ -26,7 +26,7 @@ repos:
     rev: v1.5.1
     hooks:
       - id: mypy
-        additional_dependencies: [types-requests, types-boto3]
+        additional_dependencies: [types-requests, types-boto3, fastapi, pydantic]
         args: [--ignore-missing-imports]
 
   - repo: local

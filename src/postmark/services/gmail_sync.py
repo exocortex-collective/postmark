@@ -5,11 +5,12 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass, field
-from datetime import datetime
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any
 
-import duckdb
 import psycopg2
 import schedule
 from google.cloud import pubsub_v1
@@ -43,7 +44,7 @@ class GmailSyncConfig:
     subscription_path: str
     topic_name: str
     gmail_token_path: str
-    duckdb_path: str
+    duckdb_api_url: str
     postgres: PostgresConfig
 
     @classmethod
@@ -54,7 +55,7 @@ class GmailSyncConfig:
             subscription_path=os.environ["PUBSUB_SUBSCRIPTION"],
             topic_name=os.environ["PUBSUB_TOPIC"],
             gmail_token_path=os.environ["GMAIL_TOKEN_PATH"],
-            duckdb_path=os.environ["DUCKDB_PATH"],
+            duckdb_api_url=os.environ["DUCKDB_API_URL"],
             postgres=PostgresConfig(
                 host=os.environ["POSTGRES_HOST"],
                 port=int(os.environ.get("POSTGRES_PORT", "5432")),
@@ -75,7 +76,6 @@ class GmailSync:
         self._init_gmail()
         self._init_pubsub()
         self._init_postgres()
-        self._init_duckdb()
 
     def _init_gmail(self) -> None:
         """Initialize Gmail API client."""
@@ -174,20 +174,37 @@ class GmailSync:
             )
         logger.info("Postgres schema ensured")
 
-    def _init_duckdb(self) -> None:
-        """Initialize DuckDB and ensure schema exists."""
-        self.duckdb_conn = duckdb.connect(self.config.duckdb_path)
-        self.duckdb_conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS email_bodies (
-                gmail_id TEXT PRIMARY KEY,
-                parts JSON,
-                body_data TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
+    def _store_body_via_api(
+        self, gmail_id: str, parts: list[Any] | None, body_data: str | None
+    ) -> None:
+        """Store email body via DuckDB API.
+
+        Raises on failure to allow caller to nack Pub/Sub message for retry.
         """
+        data = json.dumps(
+            {"gmail_id": gmail_id, "parts": parts, "body_data": body_data}
+        ).encode()
+
+        req = urllib.request.Request(
+            f"{self.config.duckdb_api_url}/body",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
-        logger.info(f"DuckDB initialized at {self.config.duckdb_path}")
+
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                if resp.status != 201:
+                    error_body = resp.read().decode(errors="ignore")
+                    logger.error(
+                        f"DuckDB API returned {resp.status} for {gmail_id}: {error_body}"
+                    )
+                    raise RuntimeError(
+                        f"DuckDB API returned {resp.status} for {gmail_id}"
+                    )
+        except (urllib.error.URLError, TimeoutError) as e:
+            logger.error(f"Failed to store body for {gmail_id}: {e}")
+            raise
 
     def _get_last_history_id(self, email_address: str) -> str | None:
         """Get last synced history ID for an email address."""
@@ -306,16 +323,10 @@ class GmailSync:
                 ),
             )
 
-        # Store body in DuckDB
+        # Store body via DuckDB API
         body_data = payload.get("body", {}).get("data")
         parts = payload.get("parts")
-        self.duckdb_conn.execute(
-            """
-            INSERT OR REPLACE INTO email_bodies (gmail_id, parts, body_data)
-            VALUES (?, ?, ?)
-            """,
-            (gmail_id, json.dumps(parts) if parts else None, body_data),
-        )
+        self._store_body_via_api(gmail_id, parts, body_data)
 
         # Enqueue for parsing
         with self.pg_conn.cursor() as cur:
@@ -463,6 +474,117 @@ class GmailSync:
         except Exception as e:
             logger.exception(f"Failed to renew watch: {e}")
 
+    def backfill(
+        self, days: int | None = None, after: str | None = None
+    ) -> tuple[int, int]:
+        """Backfill emails from a date.
+
+        Fetches message IDs via messages.list, stores any missing messages,
+        and updates the history baseline if we found newer messages.
+
+        Args:
+            days: Number of days back from today (e.g., 7 for last week)
+            after: Absolute date in YYYY-MM-DD format (e.g., "2025-01-01")
+
+        Returns:
+            Tuple of (stored_count, skipped_count)
+        """
+        if after:
+            # Parse absolute date with validation
+            try:
+                after_date = datetime.strptime(after, "%Y-%m-%d").strftime("%Y/%m/%d")
+            except ValueError:
+                raise ValueError(
+                    f"Invalid date format: '{after}'. Expected YYYY-MM-DD (e.g., 2025-01-01)"
+                )
+            logger.info(f"Backfilling messages after {after_date}")
+        elif days:
+            after_date = (datetime.now() - timedelta(days=days)).strftime("%Y/%m/%d")
+            logger.info(
+                f"Backfilling messages from last {days} days (after {after_date})"
+            )
+        else:
+            raise ValueError("Must provide either 'days' or 'after' parameter")
+
+        query = f"after:{after_date}"
+
+        stored = 0
+        skipped = 0
+        newest_message_id: str | None = None
+        page_token: str | None = None
+
+        # Process messages page by page to avoid loading all IDs into memory
+        while True:
+            result = (
+                self.gmail.users()
+                .messages()
+                .list(
+                    userId="me",
+                    q=query,
+                    maxResults=100,
+                    pageToken=page_token,
+                )
+                .execute()
+            )
+
+            messages = result.get("messages", [])
+            if not messages:
+                break
+
+            # Track newest message ID from first page (newest first)
+            if newest_message_id is None and messages:
+                newest_message_id = messages[0]["id"]
+
+            # Process this page (reverse to go oldest first within page)
+            for msg in reversed(messages):
+                gmail_id = msg["id"]
+                if self._email_exists(gmail_id):
+                    skipped += 1
+                    continue
+
+                try:
+                    self.store_raw_message(gmail_id)
+                    stored += 1
+
+                    if (stored + skipped) % 100 == 0:
+                        logger.info(f"Progress: stored {stored}, skipped {skipped}")
+
+                except Exception as e:
+                    logger.error(f"Failed to store {gmail_id}: {e}")
+
+            page_token = result.get("nextPageToken")
+            if not page_token:
+                break
+
+        logger.info(f"Checked {stored + skipped} messages total")
+
+        # Update history baseline if we stored new messages
+        if newest_message_id and stored > 0:
+            # Get historyId from the newest message
+            newest_msg = (
+                self.gmail.users()
+                .messages()
+                .get(userId="me", id=newest_message_id, format="minimal")
+                .execute()
+            )
+            newest_history_id = newest_msg.get("historyId")
+
+            if newest_history_id:
+                email_address = self._get_current_user_email()
+                current_history_id = self._get_last_history_id(email_address)
+
+                # Only update if we don't have a baseline yet, or if this is newer
+                # historyIds are numeric strings, higher = newer
+                if current_history_id is None or (
+                    newest_history_id
+                    and int(newest_history_id) > int(current_history_id)
+                ):
+                    self._set_last_history_id(email_address, newest_history_id)
+                    logger.info(f"Updated history baseline to {newest_history_id}")
+
+        logger.info(f"Backfill complete: stored {stored}, skipped {skipped}")
+        return stored, skipped
+
     def fallback_poll(self) -> None:
         """Hourly fallback poll to catch missed notifications."""
         logger.info("Running fallback poll")
@@ -506,9 +628,54 @@ class GmailSync:
 
 
 def main() -> None:
-    """Entry point."""
+    """Entry point.
+
+    Usage:
+        python -m postmark.services.gmail_sync                    # Normal sync mode
+        python -m postmark.services.gmail_sync --backfill 7       # Backfill 7 days then sync
+        python -m postmark.services.gmail_sync --backfill-only 7  # Backfill only, don't sync
+        python -m postmark.services.gmail_sync --backfill-from 2025-01-01  # Backfill from date
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Gmail sync service")
+    parser.add_argument(
+        "--backfill",
+        type=int,
+        metavar="DAYS",
+        help="Backfill N days of email before starting sync",
+    )
+    parser.add_argument(
+        "--backfill-only",
+        type=int,
+        metavar="DAYS",
+        help="Backfill N days of email and exit (don't start sync)",
+    )
+    parser.add_argument(
+        "--backfill-from",
+        type=str,
+        metavar="DATE",
+        help="Backfill from date (YYYY-MM-DD) and exit",
+    )
+    args = parser.parse_args()
+
     config = GmailSyncConfig.from_env()
     sync = GmailSync(config)
+
+    # Handle backfill modes
+    if args.backfill_from:
+        stored, skipped = sync.backfill(after=args.backfill_from)
+        print(f"Backfill complete: {stored} stored, {skipped} skipped")
+        return
+
+    if args.backfill_only:
+        stored, skipped = sync.backfill(days=args.backfill_only)
+        print(f"Backfill complete: {stored} stored, {skipped} skipped")
+        return
+
+    if args.backfill:
+        sync.backfill(days=args.backfill)
+
     sync.run()
 
 
