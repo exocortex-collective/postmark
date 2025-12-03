@@ -5,6 +5,7 @@ import logging
 import os
 import threading
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
@@ -192,7 +193,7 @@ class GmailSync:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 if resp.status != 201:
                     logger.error(f"DuckDB API returned {resp.status} for {gmail_id}")
-        except Exception as e:
+        except (urllib.error.URLError, TimeoutError) as e:
             logger.error(f"Failed to store body for {gmail_id}: {e}")
 
     def _get_last_history_id(self, email_address: str) -> str | None:

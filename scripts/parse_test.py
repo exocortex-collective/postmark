@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
 """Test email parsing against live data - iterate until all emails parse cleanly."""
 
-import base64
-import binascii
 import json
 import os
-import re
+import sys
 import traceback
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from email.header import decode_header
-from email.utils import parseaddr, parsedate_to_datetime
 from typing import Any
 
 import psycopg2
+
+# Add src to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from postmark.email.gmail_parser import (
+    decode_base64_body,
+    decode_mime_header,
+    extract_body_from_parts,
+    extract_email_address_only,
+    extract_email_list,
+    get_header,
+    parse_date,
+)
 
 # Configuration - all required from environment (use .env.template as reference)
 POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "")
@@ -29,6 +39,8 @@ DUCKDB_LOCAL_PATH = os.environ.get("DUCKDB_PATH", "")
 
 @dataclass
 class ParsedEmail:
+    """Test-specific parsed email with thread_id for validation."""
+
     gmail_id: str
     thread_id: str
     from_addr: str
@@ -41,122 +53,17 @@ class ParsedEmail:
     body_html: str
 
 
-def decode_mime_header(header_value: str | None) -> str:
-    """Decode RFC 2047 encoded header."""
-    if not header_value:
-        return ""
-
-    decoded_parts = []
-    for part, charset in decode_header(header_value):
-        if isinstance(part, bytes):
-            charset = charset or "utf-8"
-            try:
-                decoded_parts.append(part.decode(charset, errors="replace"))
-            except (LookupError, UnicodeDecodeError):
-                decoded_parts.append(part.decode("utf-8", errors="replace"))
-        else:
-            decoded_parts.append(part)
-    return "".join(decoded_parts)
-
-
-def extract_email_address(header_value: str | None) -> str:
-    """Extract clean email address from header like 'Name <email@example.com>'."""
-    if not header_value:
-        return ""
-    decoded = decode_mime_header(header_value)
-    name, addr = parseaddr(decoded)
-    return addr or decoded
-
-
-def extract_email_list(header_value: str | None) -> list[str]:
-    """Extract list of email addresses from comma-separated header."""
-    if not header_value:
-        return []
-    decoded = decode_mime_header(header_value)
-    # Split on comma, but be careful with quoted names containing commas
-    addresses = []
-    for part in re.split(r',\s*(?=(?:[^"]*"[^"]*")*[^"]*$)', decoded):
-        part = part.strip()
-        if part:
-            _, addr = parseaddr(part)
-            addresses.append(addr or part)
-    return [a for a in addresses if a]
-
-
-def parse_date(header_value: str | None, internal_date_ms: int) -> datetime | None:
-    """Parse date from header, falling back to internal_date."""
-    if header_value:
-        try:
-            dt = parsedate_to_datetime(header_value)
-            # Ensure timezone awareness
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt
-        except (ValueError, TypeError):
-            pass
-
-    # Fall back to Gmail's internal date
-    if internal_date_ms:
-        return datetime.fromtimestamp(internal_date_ms / 1000, tz=timezone.utc)
-    return None
-
-
-def decode_base64_body(data: str | None) -> str:
-    """Decode base64url encoded body data."""
-    if not data:
-        return ""
-    try:
-        # Gmail uses URL-safe base64
-        decoded = base64.urlsafe_b64decode(data + "==")
-        return decoded.decode("utf-8", errors="replace")
-    except (binascii.Error, ValueError, UnicodeDecodeError):
-        return ""
-
-
-def extract_body_from_parts(parts: list[dict[str, Any]] | None, mime_type: str) -> str:
-    """Recursively extract body content from MIME parts."""
-    if not parts:
-        return ""
-
-    for part in parts:
-        part_mime = part.get("mimeType", "")
-
-        if part_mime == mime_type:
-            body = part.get("body", {})
-            data = body.get("data")
-            if data:
-                return decode_base64_body(data)
-
-        # Recurse into nested parts
-        nested = part.get("parts")
-        if nested:
-            result = extract_body_from_parts(nested, mime_type)
-            if result:
-                return result
-
-    return ""
-
-
-def get_header(headers: list[dict[str, str]], name: str) -> str | None:
-    """Get header value by name (case-insensitive)."""
-    name_lower = name.lower()
-    for h in headers:
-        if h.get("name", "").lower() == name_lower:
-            return h.get("value")
-    return None
-
-
 def parse_email(row: dict[str, Any], body_data: dict[str, Any]) -> ParsedEmail:
-    """Parse a raw email into structured fields."""
+    """Parse a raw email into structured fields for testing."""
     headers = row["headers"]  # Already JSON
 
-    from_addr = extract_email_address(get_header(headers, "From"))
-    to_addr = extract_email_address(get_header(headers, "To"))
+    from_addr = extract_email_address_only(get_header(headers, "From"))
+    to_addr = extract_email_address_only(get_header(headers, "To"))
     # Fall back to Delivered-To for BCC'd emails or undisclosed-recipients
     if not to_addr or "undisclosed-recipients" in to_addr.lower():
-        to_addr = extract_email_address(get_header(headers, "Delivered-To"))
+        to_addr = extract_email_address_only(get_header(headers, "Delivered-To"))
     cc = extract_email_list(get_header(headers, "Cc"))
-    bcc = extract_email_address(get_header(headers, "Bcc"))
+    bcc = extract_email_address_only(get_header(headers, "Bcc"))
     subject = decode_mime_header(get_header(headers, "Subject"))
     date = parse_date(get_header(headers, "Date"), row["internal_date"])
 
@@ -251,7 +158,9 @@ def get_body_data(gmail_id: str, duck_conn: Any = None) -> dict[str, Any]:
             with urllib.request.urlopen(url, timeout=10) as resp:
                 data = json.loads(resp.read().decode())
                 return {"parts": data.get("parts"), "body_data": data.get("body_data")}
-        except Exception:
+        except (urllib.error.URLError, TimeoutError):
+            return {"parts": None, "body_data": None}
+        except json.JSONDecodeError:
             return {"parts": None, "body_data": None}
     else:
         # Use local DuckDB connection

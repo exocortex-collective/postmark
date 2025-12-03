@@ -112,3 +112,26 @@ From archived code, still in use:
 
 - **Gemini Code Assist**: Automatic code review on PRs
 - **Renovate**: Automated dependency updates
+
+## Code Review Workflow
+
+When checking PR reviews, only fetch **unresolved** comments - resolved conversations indicate completed items:
+
+```bash
+# Get unresolved review threads
+gh api graphql -f query='
+query($owner: String!, $repo: String!, $pr: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $pr) {
+      reviewThreads(first: 100) {
+        nodes {
+          isResolved
+          comments(first: 10) {
+            nodes { body path line }
+          }
+        }
+      }
+    }
+  }
+}' -f owner=devonjones -f repo=postmark -F pr=24 --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)'
+```
