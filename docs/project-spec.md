@@ -7,6 +7,22 @@
 
 Postmark is the email ingestion service for Cortex. It receives push notifications from Gmail via GCP Pub/Sub, fetches new messages using the Gmail History API, and stores them for downstream processing by other Cortex services (triage, hoard, etc.).
 
+## Design Philosophy
+
+**This is explicitly designed for single-user homelab deployments.** Postmark is intended for individuals who want to run their own email triage system with full control over their infrastructure and data.
+
+Key assumptions:
+- **Single Gmail account**: One deployment handles one Gmail account
+- **Self-hosted**: Runs on your own hardware (homelab, VPS, etc.)
+- **Full asset control**: You manage your own GCP project, Postgres, secrets
+
+If you want to monitor multiple Gmail accounts, each account requires its own:
+- OAuth credentials and token
+- GCP Pub/Sub topic/subscription
+- Deployment instance
+
+This is intentional - it keeps the system simple and avoids the complexity of multi-tenant authentication, while giving you complete ownership of your email data.
+
 ## Architecture
 
 ```

@@ -2,10 +2,12 @@
 
 Gmail integration layer for Cortex. Syncs email via GCP Pub/Sub push notifications.
 
+**Single-user homelab deployment only.** One instance = one Gmail account. See `docs/project-spec.md` for design philosophy.
+
 ## Quick Reference
 
 - **Spec**: `docs/project-spec.md`
-- **Main service**: `src/postmark/services/gmail_sync.py` (to be created)
+- **Main service**: `src/postmark/services/gmail_sync.py`
 - **Archived code**: `src/postmark/archive/` (Gmail takeout batch processing)
 
 ## Project Structure
@@ -74,9 +76,10 @@ uv run isort .
 
 ## Deployment
 
-- Docker image: `ghcr.io/<user>/cortex-postmark:latest`
-- Stack: `cortex-postmark` on Hades via Portainer
+- Docker image: `us-central1-docker.pkg.dev/cortex-gmail/cortex/postmark:latest`
+- Container: `cortex-gmail-sync` on Hades
 - Infrastructure: GCP resources managed in `cortex-infra` repo
+- CI/CD: GitHub Actions with Workload Identity Federation (keyless GCP auth)
 
 ## Queue Interface
 
