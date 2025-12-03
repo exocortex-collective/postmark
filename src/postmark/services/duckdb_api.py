@@ -108,11 +108,23 @@ def get_stats() -> StatsResponse:
 
 
 @app.get("/gmail_ids", response_model=GmailIdsResponse)
-def get_gmail_ids() -> GmailIdsResponse:
-    """Get all gmail_ids stored in DuckDB (for backfill comparison)."""
+def get_gmail_ids(
+    limit: int = Query(0, description="Max IDs to return (0 = all)"),
+    offset: int = Query(0, description="Number of IDs to skip"),
+) -> GmailIdsResponse:
+    """Get gmail_ids stored in DuckDB (for backfill comparison).
+
+    Supports pagination via limit/offset for large datasets.
+    """
     with _lock:
         conn = get_connection()
-        rows = conn.execute("SELECT gmail_id FROM email_bodies").fetchall()
+        if limit > 0:
+            rows = conn.execute(
+                "SELECT gmail_id FROM email_bodies LIMIT ? OFFSET ?",
+                [limit, offset],
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT gmail_id FROM email_bodies").fetchall()
     gmail_ids = [row[0] for row in rows]
     return GmailIdsResponse(gmail_ids=gmail_ids, count=len(gmail_ids))
 
