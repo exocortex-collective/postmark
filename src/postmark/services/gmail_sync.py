@@ -423,20 +423,38 @@ class GmailSync:
 
             expiration_ms = int(response["expiration"])
             expiration_dt = datetime.fromtimestamp(expiration_ms / 1000)
+            history_id = str(response["historyId"])
 
             # Get the actual email address for this user
             email_address = self._get_current_user_email()
 
             with self.pg_conn.cursor() as cur:
+                # Check if user already has sync state
                 cur.execute(
-                    """
-                    INSERT INTO sync_state (email_address, last_history_id, watch_expiration)
-                    VALUES (%s, '', %s)
-                    ON CONFLICT (email_address)
-                    DO UPDATE SET watch_expiration = %s
-                    """,
-                    (email_address, expiration_dt, expiration_dt),
+                    "SELECT id FROM sync_state WHERE email_address = %s",
+                    (email_address,),
                 )
+                if cur.fetchone():
+                    # Existing user - just update watch expiration
+                    cur.execute(
+                        """
+                        UPDATE sync_state
+                        SET watch_expiration = %s, last_sync_at = NOW()
+                        WHERE email_address = %s
+                        """,
+                        (expiration_dt, email_address),
+                    )
+                else:
+                    # New user - use historyId from watch() as baseline
+                    cur.execute(
+                        """
+                        INSERT INTO sync_state
+                            (email_address, last_history_id, watch_expiration)
+                        VALUES (%s, %s, %s)
+                        """,
+                        (email_address, history_id, expiration_dt),
+                    )
+                    logger.info(f"New sync state created for {email_address}")
 
             logger.info(
                 f"Watch renewed for {email_address}, expires at {expiration_dt}"
