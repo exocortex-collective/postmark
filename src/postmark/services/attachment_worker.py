@@ -81,8 +81,14 @@ class AttachmentWorker:
 
     def _get_gmail_service(self) -> Resource:
         if self._gmail_service is None:
-            with open(self.config.gmail_token_path) as f:
-                token_data = json.load(f)
+            try:
+                with open(self.config.gmail_token_path) as f:
+                    token_data = json.load(f)
+            except FileNotFoundError:
+                logger.critical(
+                    f"Gmail token file not found at: {self.config.gmail_token_path}"
+                )
+                raise
             creds = Credentials(
                 token=token_data["token"],
                 refresh_token=token_data["refresh_token"],
@@ -215,43 +221,6 @@ class AttachmentWorker:
             )
             conn.commit()
 
-    def _store_attachment_record(
-        self,
-        gmail_id: str,
-        attachment_id: str,
-        filename: str,
-        mime_type: str,
-        size_bytes: int,
-        s3_key: str,
-    ) -> None:
-        """Store attachment metadata in Postgres."""
-        conn = self._get_pg_conn()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO attachments (
-                    gmail_id, attachment_id, filename, mime_type,
-                    size_bytes, s3_bucket, s3_key
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (gmail_id, attachment_id) DO UPDATE SET
-                    filename = EXCLUDED.filename,
-                    mime_type = EXCLUDED.mime_type,
-                    size_bytes = EXCLUDED.size_bytes,
-                    s3_bucket = EXCLUDED.s3_bucket,
-                    s3_key = EXCLUDED.s3_key
-            """,
-                (
-                    gmail_id,
-                    attachment_id,
-                    filename,
-                    mime_type,
-                    size_bytes,
-                    self.config.s3_bucket,
-                    s3_key,
-                ),
-            )
-            conn.commit()
-
     def process_job(self, job: dict[str, Any]) -> bool:
         """Process a single attachment job. Returns True on success."""
         gmail_id = job["payload"]["gmail_id"]
@@ -294,7 +263,8 @@ class AttachmentWorker:
             )
 
             # Decode base64url data
-            data = base64.urlsafe_b64decode(att_response["data"])
+            # Gmail API returns base64url without padding - add it for safe decoding
+            data = base64.urlsafe_b64decode(att_response["data"] + "==")
 
             # Generate S3 key: attachments/{gmail_id}/{attachment_id}/{filename}
             # Sanitize filename to prevent path traversal attacks
@@ -311,17 +281,42 @@ class AttachmentWorker:
                 ContentType=metadata["mime_type"],
             )
 
-            # Store record in Postgres
-            self._store_attachment_record(
-                gmail_id=gmail_id,
-                attachment_id=attachment_id,
-                filename=filename,
-                mime_type=metadata["mime_type"],
-                size_bytes=len(data),
-                s3_key=s3_key,
-            )
+            # Store record and complete job in single transaction for atomicity
+            conn = self._get_pg_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO attachments (
+                        gmail_id, attachment_id, filename, mime_type,
+                        size_bytes, s3_bucket, s3_key
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (gmail_id, attachment_id) DO UPDATE SET
+                        filename = EXCLUDED.filename,
+                        mime_type = EXCLUDED.mime_type,
+                        size_bytes = EXCLUDED.size_bytes,
+                        s3_bucket = EXCLUDED.s3_bucket,
+                        s3_key = EXCLUDED.s3_key
+                """,
+                    (
+                        gmail_id,
+                        attachment_id,
+                        filename,
+                        metadata["mime_type"],
+                        len(data),
+                        self.config.s3_bucket,
+                        s3_key,
+                    ),
+                )
+                cur.execute(
+                    """
+                    UPDATE queue
+                    SET status = 'completed', completed_at = NOW()
+                    WHERE id = %s
+                """,
+                    (job["id"],),
+                )
+                conn.commit()
 
-            self._complete_job(job["id"])
             logger.info(f"Stored attachment: {s3_key} ({len(data)} bytes)")
             return True
 
