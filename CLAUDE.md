@@ -82,6 +82,16 @@ uv run black .
 uv run isort .
 ```
 
+## Git Workflow
+
+**All changes must go through PRs - never push directly to main.**
+
+1. Create a feature branch: `git checkout -b feature-name`
+2. Make changes and commit
+3. Push branch and create PR: `git push -u origin feature-name && gh pr create`
+4. Wait for CI to pass
+5. Merge via GitHub (squash or merge commit)
+
 ## Deployment
 
 Two containers run together:
