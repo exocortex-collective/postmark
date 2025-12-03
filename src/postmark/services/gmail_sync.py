@@ -500,10 +500,12 @@ class GmailSync:
 
         query = f"after:{after_date}"
 
-        # Fetch all message IDs in date range
-        message_ids: list[str] = []
+        stored = 0
+        skipped = 0
+        newest_message_id: str | None = None
         page_token: str | None = None
 
+        # Process messages page by page to avoid loading all IDs into memory
         while True:
             result = (
                 self.gmail.users()
@@ -518,42 +520,43 @@ class GmailSync:
             )
 
             messages = result.get("messages", [])
-            message_ids.extend(msg["id"] for msg in messages)
+            if not messages:
+                break
+
+            # Track newest message ID from first page (newest first)
+            if newest_message_id is None and messages:
+                newest_message_id = messages[0]["id"]
+
+            # Process this page (reverse to go oldest first within page)
+            for msg in reversed(messages):
+                gmail_id = msg["id"]
+                if self._email_exists(gmail_id):
+                    skipped += 1
+                    continue
+
+                try:
+                    self.store_raw_message(gmail_id)
+                    stored += 1
+
+                    if (stored + skipped) % 100 == 0:
+                        logger.info(f"Progress: stored {stored}, skipped {skipped}")
+
+                except Exception as e:
+                    logger.error(f"Failed to store {gmail_id}: {e}")
 
             page_token = result.get("nextPageToken")
             if not page_token:
                 break
 
-        logger.info(f"Found {len(message_ids)} messages to check")
+        logger.info(f"Checked {stored + skipped} messages total")
 
-        stored = 0
-        skipped = 0
-        newest_history_id: str | None = None
-
-        # Process from oldest to newest (list returns newest first, so reverse)
-        for gmail_id in reversed(message_ids):
-            if self._email_exists(gmail_id):
-                skipped += 1
-                continue
-
-            try:
-                self.store_raw_message(gmail_id)
-                stored += 1
-
-                # TODO: Could optimize by having store_raw_message return historyId
-                if stored % 50 == 0:
-                    logger.info(f"Progress: stored {stored}, skipped {skipped}")
-
-            except Exception as e:
-                logger.error(f"Failed to store {gmail_id}: {e}")
-
-        # Update history baseline if we have messages and need to set initial state
-        if message_ids and stored > 0:
-            # Get historyId from the newest message (first in original list)
+        # Update history baseline if we stored new messages
+        if newest_message_id and stored > 0:
+            # Get historyId from the newest message
             newest_msg = (
                 self.gmail.users()
                 .messages()
-                .get(userId="me", id=message_ids[0], format="minimal")
+                .get(userId="me", id=newest_message_id, format="minimal")
                 .execute()
             )
             newest_history_id = newest_msg.get("historyId")

@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """Test email parsing against live data - iterate until all emails parse cleanly."""
 
-import json
 import os
 import sys
 import traceback
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -17,6 +14,10 @@ import psycopg2
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from postmark.email.gmail_parser import parse_gmail_message
+from postmark.storage.duckdb_client import (
+    get_body_data_from_api,
+    get_body_data_from_local,
+)
 
 # Configuration - all required from environment (use .env.template as reference)
 POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "")
@@ -112,27 +113,9 @@ def validate_email(parsed: TestParsedEmail, internal_date_ms: int) -> list[str]:
 def get_body_data(gmail_id: str, duck_conn: Any = None) -> dict[str, Any]:
     """Fetch body data from DuckDB (via API or local connection)."""
     if DUCKDB_API_URL:
-        # Use REST API
-        url = f"{DUCKDB_API_URL}/body?gmail_id={gmail_id}"
-        try:
-            with urllib.request.urlopen(url, timeout=10) as resp:
-                data = json.loads(resp.read().decode())
-                return {"parts": data.get("parts"), "body_data": data.get("body_data")}
-        except (urllib.error.URLError, TimeoutError):
-            return {"parts": None, "body_data": None}
-        except json.JSONDecodeError:
-            return {"parts": None, "body_data": None}
+        return get_body_data_from_api(DUCKDB_API_URL, gmail_id)
     else:
-        # Use local DuckDB connection
-        if duck_conn is None:
-            return {"parts": None, "body_data": None}
-        result = duck_conn.execute(
-            "SELECT parts, body_data FROM email_bodies WHERE gmail_id = ?",
-            [gmail_id],
-        ).fetchone()
-        if result:
-            return {"parts": result[0], "body_data": result[1]}
-        return {"parts": None, "body_data": None}
+        return get_body_data_from_local(duck_conn, gmail_id)
 
 
 def main() -> None:
@@ -166,8 +149,13 @@ def main() -> None:
 
 def _run_tests(pg_conn: Any, duck_conn: Any) -> None:
     """Run the actual parse tests."""
-    # Fetch all raw emails
+    # Get count first for progress reporting
     cur = pg_conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM emails_raw")
+    total_count = cur.fetchone()[0]
+    print(f"Processing {total_count} emails...\n")
+
+    # Iterate over cursor instead of loading all into memory
     cur.execute(
         """
         SELECT gmail_id, thread_id, headers, internal_date, snippet, mime_type
@@ -175,15 +163,12 @@ def _run_tests(pg_conn: Any, duck_conn: Any) -> None:
         ORDER BY internal_date DESC
     """
     )
-
     columns = [desc[0] for desc in cur.description]
-    rows = [dict(zip(columns, row)) for row in cur.fetchall()]
-
-    print(f"Processing {len(rows)} emails...\n")
 
     # Track issues and stats in a single pass
     total_issues = 0
     emails_with_issues = 0
+    processed_count = 0
     has_text_only = 0
     has_html_only = 0
     has_both = 0
@@ -191,7 +176,9 @@ def _run_tests(pg_conn: Any, duck_conn: Any) -> None:
     from_domains: dict[str, int] = {}
     dates: list[datetime] = []
 
-    for row in rows:
+    for row_tuple in cur:
+        row = dict(zip(columns, row_tuple))
+        processed_count += 1
         body_data = get_body_data(row["gmail_id"], duck_conn)
 
         try:
@@ -239,7 +226,7 @@ def _run_tests(pg_conn: Any, duck_conn: Any) -> None:
 
     print(f"\n{'='*60}")
     print(
-        f"Summary: {len(rows)} emails, {emails_with_issues} with issues, {total_issues} total issues"
+        f"Summary: {processed_count} emails, {emails_with_issues} with issues, {total_issues} total issues"
     )
 
     print(f"\n{'='*60}")

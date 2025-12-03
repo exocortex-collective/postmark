@@ -2,14 +2,11 @@
 """Parse worker service - processes raw emails from queue into structured data."""
 
 import argparse
-import json
 import logging
 import os
 import signal
 import sys
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,6 +14,7 @@ import psycopg2
 from psycopg2.extras import Json
 
 from postmark.email.gmail_parser import ParsedEmail, parse_gmail_message
+from postmark.storage.duckdb_client import get_body_data
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,21 +33,6 @@ class Config:
     duckdb_api_url: str
     batch_size: int = 100
     poll_interval: int = 5  # seconds between queue polls when empty
-
-
-def get_body_data(duckdb_api_url: str, gmail_id: str) -> dict[str, Any]:
-    """Fetch body data from DuckDB API."""
-    url = f"{duckdb_api_url}/body?gmail_id={gmail_id}"
-    try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
-            return {"parts": data.get("parts"), "body_data": data.get("body_data")}
-    except (urllib.error.URLError, TimeoutError) as e:
-        logger.warning(f"Network error fetching body for {gmail_id}: {e}")
-        return {"parts": None, "body_data": None}
-    except json.JSONDecodeError as e:
-        logger.warning(f"Invalid JSON response for {gmail_id}: {e}")
-        return {"parts": None, "body_data": None}
 
 
 class ParseWorker:
