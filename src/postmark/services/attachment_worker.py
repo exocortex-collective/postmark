@@ -3,6 +3,7 @@
 
 import argparse
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -272,11 +273,13 @@ class AttachmentWorker:
             raw_data = att_response["data"]
             data = base64.urlsafe_b64decode(raw_data + "=" * (-len(raw_data) % 4))
 
-            # Generate S3 key: attachments/{gmail_id}/{attachment_id}/{filename}
+            # Generate S3 key: attachments/{gmail_id}/{attachment_id_hash}/{filename}
             # Sanitize filename to prevent path traversal attacks
             raw_filename = metadata["filename"] or "attachment"
             filename = os.path.basename(raw_filename)
-            s3_key = f"attachments/{gmail_id}/{attachment_id}/{filename}"
+            # Hash the attachment_id to avoid special characters that Minio rejects
+            att_id_hash = hashlib.sha256(attachment_id.encode()).hexdigest()
+            s3_key = f"attachments/{gmail_id}/{att_id_hash}/{filename}"
 
             # Upload to S3/Minio
             s3 = self._get_s3_client()
