@@ -14,24 +14,13 @@ from typing import Any
 
 import psycopg2
 
-# Connect to Postgres
-pg_conn = psycopg2.connect(
-    host="10.5.2.21",
-    dbname="cortex",
-    user="cortex",
-    password="cortex",
-)
-
-# DuckDB API endpoint (set to None to use local file)
+# Configuration from environment variables
+POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "10.5.2.21")
+POSTGRES_DB = os.environ.get("POSTGRES_DB", "cortex")
+POSTGRES_USER = os.environ.get("POSTGRES_USER", "cortex")
+POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "")
 DUCKDB_API_URL = os.environ.get("DUCKDB_API_URL")  # e.g., "http://10.5.2.21:8081"
 DUCKDB_LOCAL_PATH = os.environ.get("DUCKDB_PATH", "/tmp/cortex-data/emails.duckdb")
-
-# Local DuckDB connection (if not using API)
-duck_conn = None
-if not DUCKDB_API_URL:
-    import duckdb
-
-    duck_conn = duckdb.connect(DUCKDB_LOCAL_PATH, read_only=True)
 
 
 @dataclass
@@ -252,7 +241,7 @@ def validate_email(parsed: ParsedEmail, internal_date_ms: int) -> list[str]:
     return issues
 
 
-def get_body_data(gmail_id: str) -> dict[str, Any]:
+def get_body_data(gmail_id: str, duck_conn: Any = None) -> dict[str, Any]:
     """Fetch body data from DuckDB (via API or local connection)."""
     if DUCKDB_API_URL:
         # Use REST API
@@ -277,6 +266,36 @@ def get_body_data(gmail_id: str) -> dict[str, Any]:
 
 
 def main() -> None:
+    # Validate required env vars
+    if not POSTGRES_PASSWORD:
+        print("Error: POSTGRES_PASSWORD environment variable is required")
+        print("Usage: POSTGRES_PASSWORD=xxx python scripts/parse_test.py")
+        return
+
+    # Connect to databases
+    pg_conn = psycopg2.connect(
+        host=POSTGRES_HOST,
+        dbname=POSTGRES_DB,
+        user=POSTGRES_USER,
+        password=POSTGRES_PASSWORD,
+    )
+
+    duck_conn = None
+    if not DUCKDB_API_URL:
+        import duckdb
+
+        duck_conn = duckdb.connect(DUCKDB_LOCAL_PATH, read_only=True)
+
+    try:
+        _run_tests(pg_conn, duck_conn)
+    finally:
+        pg_conn.close()
+        if duck_conn:
+            duck_conn.close()
+
+
+def _run_tests(pg_conn: Any, duck_conn: Any) -> None:
+    """Run the actual parse tests."""
     # Fetch all raw emails
     cur = pg_conn.cursor()
     cur.execute(
@@ -296,7 +315,7 @@ def main() -> None:
     emails_with_issues = 0
 
     for row in rows:
-        body_data = get_body_data(row["gmail_id"])
+        body_data = get_body_data(row["gmail_id"], duck_conn)
 
         try:
             parsed = parse_email(row, body_data)
@@ -339,7 +358,7 @@ def main() -> None:
     dates: list[datetime] = []
 
     for row in rows:
-        body_data = get_body_data(row["gmail_id"])
+        body_data = get_body_data(row["gmail_id"], duck_conn)
         parsed = parse_email(row, body_data)
 
         if parsed.body_text and parsed.body_html:
@@ -387,7 +406,7 @@ def main() -> None:
     sample_rows = [dict(zip(columns, row)) for row in cur.fetchall()]
 
     for row in sample_rows:
-        body_data = get_body_data(row["gmail_id"])
+        body_data = get_body_data(row["gmail_id"], duck_conn)
         parsed = parse_email(row, body_data)
         print(f"Gmail ID: {parsed.gmail_id}")
         print(f"Thread ID: {parsed.thread_id}")
