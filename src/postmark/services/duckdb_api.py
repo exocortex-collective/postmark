@@ -86,6 +86,11 @@ class BodiesResponse(BaseModel):
     bodies: dict[str, dict[str, Any]]
 
 
+class GmailIdsResponse(BaseModel):
+    gmail_ids: list[str]
+    count: int
+
+
 @app.get("/health", response_model=StatusResponse)
 def health_check() -> StatusResponse:
     """Health check endpoint."""
@@ -100,6 +105,28 @@ def get_stats() -> StatsResponse:
         row = conn.execute("SELECT COUNT(*) FROM email_bodies").fetchone()
     count = row[0] if row else 0
     return StatsResponse(count=count)
+
+
+@app.get("/gmail_ids", response_model=GmailIdsResponse)
+def get_gmail_ids(
+    limit: int = Query(0, description="Max IDs to return (0 = all)"),
+    offset: int = Query(0, description="Number of IDs to skip"),
+) -> GmailIdsResponse:
+    """Get gmail_ids stored in DuckDB (for backfill comparison).
+
+    Supports pagination via limit/offset for large datasets.
+    """
+    with _lock:
+        conn = get_connection()
+        if limit > 0:
+            rows = conn.execute(
+                "SELECT gmail_id FROM email_bodies LIMIT ? OFFSET ?",
+                [limit, offset],
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT gmail_id FROM email_bodies").fetchall()
+    gmail_ids = [row[0] for row in rows]
+    return GmailIdsResponse(gmail_ids=gmail_ids, count=len(gmail_ids))
 
 
 @app.get("/body", response_model=BodyResponse)
