@@ -278,7 +278,7 @@ class AttachmentWorker:
             raw_filename = metadata["filename"] or "attachment"
             filename = os.path.basename(raw_filename)
             # Hash the attachment_id to avoid special characters that Minio rejects
-            att_id_hash = hashlib.sha256(attachment_id.encode()).hexdigest()[:16]
+            att_id_hash = hashlib.sha256(attachment_id.encode()).hexdigest()
             s3_key = f"attachments/{gmail_id}/{att_id_hash}/{filename}"
 
             # Upload to S3/Minio
