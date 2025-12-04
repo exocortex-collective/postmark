@@ -65,6 +65,18 @@ DUCKDB_API_URL=http://cortex-duckdb-api:8081
 DUCKDB_PATH=/app/data/emails.duckdb
 ```
 
+## Postgres Access
+
+Postgres runs in a Docker container on hades. To run queries:
+
+```bash
+# Via docker exec
+ssh devon@10.5.2.21 "docker exec -i cortex-postgres psql -U cortex -d cortex -c 'SELECT ...'"
+
+# Interactive
+ssh devon@10.5.2.21 "docker exec -it cortex-postgres psql -U cortex -d cortex"
+```
+
 ## Development
 
 ```bash
@@ -147,7 +159,7 @@ Postmark enqueues new emails for downstream processing:
 ```sql
 -- Enqueue pattern (consumed by triage)
 INSERT INTO queue (queue_name, payload)
-VALUES ('classify', '{"email_id": 123, "gmail_id": "abc123"}');
+VALUES ('triage', '{"email_id": 123, "gmail_id": "abc123"}');
 ```
 
 ## Reusable Components
