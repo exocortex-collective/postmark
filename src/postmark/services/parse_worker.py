@@ -220,14 +220,14 @@ class ParseWorker:
             )  # Truncate error to 1000 chars
             conn.commit()
 
-    def _enqueue_classify(self, gmail_id: str) -> None:
-        """Enqueue email for classification."""
+    def _enqueue_triage(self, gmail_id: str) -> None:
+        """Enqueue email for triage (classification and routing)."""
         conn = self._get_pg_conn()
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO queue (queue_name, payload)
-                VALUES ('classify', %s)
+                VALUES ('triage', %s)
             """,
                 (Json({"gmail_id": gmail_id}),),
             )
@@ -254,8 +254,8 @@ class ParseWorker:
             # Store parsed result
             self._store_parsed(parsed)
 
-            # Enqueue for classification
-            self._enqueue_classify(gmail_id)
+            # Enqueue for triage (classification and routing)
+            self._enqueue_triage(gmail_id)
 
             # Mark job complete
             self._complete_job(job["id"])

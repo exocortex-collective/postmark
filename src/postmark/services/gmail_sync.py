@@ -170,6 +170,24 @@ class GmailSync:
                 CREATE INDEX IF NOT EXISTS idx_queue_pending
                     ON queue(queue_name, status, created_at)
                     WHERE status = 'pending';
+
+                -- Gmail labels cache (id -> name mapping)
+                -- name_parts stores hierarchical names as arrays for easy querying
+                -- e.g. "Cortex/Todo" -> ['Cortex', 'Todo']
+                CREATE TABLE IF NOT EXISTS gmail_labels (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,           -- Original name (e.g. "Cortex/Todo")
+                    name_parts TEXT[] NOT NULL,   -- Split hierarchy (e.g. ['Cortex', 'Todo'])
+                    type TEXT,  -- 'system' or 'user'
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_gmail_labels_name
+                    ON gmail_labels(name);
+
+                -- GIN index for efficient array queries (e.g. WHERE 'Cortex' = ANY(name_parts))
+                CREATE INDEX IF NOT EXISTS idx_gmail_labels_parts
+                    ON gmail_labels USING GIN(name_parts);
             """
             )
         logger.info("Postgres schema ensured")
@@ -351,6 +369,139 @@ class GmailSync:
 
         logger.info(f"Stored message {gmail_id}")
 
+    def _sync_labels_to_db(self) -> None:
+        """Fetch all Gmail labels and sync to database."""
+        response = self.gmail.users().labels().list(userId="me").execute()
+        labels = response.get("labels", [])
+
+        with self.pg_conn.cursor() as cur:
+            for label in labels:
+                name = label["name"]
+                # Split hierarchical name into parts (e.g. "Cortex/Todo" -> ["Cortex", "Todo"])
+                name_parts = name.split("/")
+                cur.execute(
+                    """
+                    INSERT INTO gmail_labels (id, name, name_parts, type, updated_at)
+                    VALUES (%s, %s, %s, %s, NOW())
+                    ON CONFLICT (id) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        name_parts = EXCLUDED.name_parts,
+                        type = EXCLUDED.type,
+                        updated_at = NOW()
+                    """,
+                    (label["id"], name, name_parts, label.get("type")),
+                )
+        self.pg_conn.commit()
+        logger.info(f"Synced {len(labels)} labels to database")
+
+    def _get_label_name(self, label_id: str) -> str | None:
+        """Get label name from ID, using database cache."""
+        # Check in-memory cache first
+        if not hasattr(self, "_label_cache"):
+            self._label_cache: dict[str, str] = {}
+
+        if label_id in self._label_cache:
+            return self._label_cache[label_id]
+
+        # Check database
+        with self.pg_conn.cursor() as cur:
+            cur.execute(
+                "SELECT name FROM gmail_labels WHERE id = %s",
+                (label_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                name: str = row[0]
+                self._label_cache[label_id] = name
+                return name
+
+        # Not in DB - sync labels and try again
+        self._sync_labels_to_db()
+        with self.pg_conn.cursor() as cur:
+            cur.execute(
+                "SELECT name FROM gmail_labels WHERE id = %s",
+                (label_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                name = row[0]
+                self._label_cache[label_id] = name
+                return name
+
+        return None
+
+    def _process_label_event(
+        self, gmail_id: str, label_ids: list[str], event_type: str
+    ) -> None:
+        """Process label add/remove events.
+
+        Updates label_ids in emails_raw and enqueues Cortex/* label events
+        to the actions queue for workflow dispatch.
+        """
+        if not label_ids:
+            return
+
+        # Update label_ids array in emails_raw
+        with self.pg_conn.cursor() as cur:
+            if event_type == "added":
+                # Add labels to array (avoiding duplicates)
+                cur.execute(
+                    """
+                    UPDATE emails_raw
+                    SET label_ids = (
+                        SELECT array_agg(DISTINCT elem)
+                        FROM unnest(label_ids || %s::text[]) elem
+                    )
+                    WHERE gmail_id = %s
+                    """,
+                    (label_ids, gmail_id),
+                )
+            else:  # removed
+                # Remove labels from array
+                cur.execute(
+                    """
+                    UPDATE emails_raw
+                    SET label_ids = (
+                        SELECT array_agg(elem)
+                        FROM unnest(label_ids) elem
+                        WHERE elem != ALL(%s::text[])
+                    )
+                    WHERE gmail_id = %s
+                    """,
+                    (label_ids, gmail_id),
+                )
+        self.pg_conn.commit()
+
+        # Enqueue Cortex/* labels for actions service
+        for label_id in label_ids:
+            label_name = self._get_label_name(label_id)
+            if label_name is None:
+                continue
+
+            # Only enqueue Cortex/* labels for workflow dispatch
+            if not label_name.startswith("Cortex/"):
+                continue
+
+            logger.info(f"Label {event_type}: {label_name} on message {gmail_id}")
+
+            with self.pg_conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO queue (queue_name, payload)
+                    VALUES ('actions', %s)
+                    """,
+                    (
+                        json.dumps(
+                            {
+                                "gmail_id": gmail_id,
+                                "label": label_name,
+                                "event_type": event_type,
+                            }
+                        ),
+                    ),
+                )
+            self.pg_conn.commit()
+
     def process_notification(
         self, message: pubsub_v1.subscriber.message.Message
     ) -> None:
@@ -381,7 +532,7 @@ class GmailSync:
                     .list(
                         userId="me",
                         startHistoryId=last_history_id,
-                        historyTypes=["messageAdded"],
+                        historyTypes=["messageAdded", "labelAdded", "labelRemoved"],
                     )
                     .execute()
                 )
@@ -396,11 +547,24 @@ class GmailSync:
                     return
                 raise
 
-            # Process new messages
+            # Process history records
             for record in history_response.get("history", []):
+                # New messages
                 for msg_added in record.get("messagesAdded", []):
                     msg_id = msg_added["message"]["id"]
                     self.store_raw_message(msg_id)
+
+                # Label additions - enqueue Cortex/* labels for actions service
+                for label_added in record.get("labelsAdded", []):
+                    msg_id = label_added["message"]["id"]
+                    label_ids = label_added.get("labelIds", [])
+                    self._process_label_event(msg_id, label_ids, "added")
+
+                # Label removals - track for corrections
+                for label_removed in record.get("labelsRemoved", []):
+                    msg_id = label_removed["message"]["id"]
+                    label_ids = label_removed.get("labelIds", [])
+                    self._process_label_event(msg_id, label_ids, "removed")
 
             # Update history ID
             new_id = history_response.get("historyId", new_history_id)
