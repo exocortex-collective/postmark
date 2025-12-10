@@ -429,7 +429,12 @@ class GmailSync:
                 raise
 
     def _sync_labels_to_db(self) -> None:
-        """Fetch all Gmail labels and sync to database."""
+        """Fetch all Gmail labels and sync to database.
+
+        This performs a full sync: adds/updates current labels and removes
+        any labels that no longer exist in Gmail. Also clears the in-memory
+        cache to ensure fresh data on subsequent lookups.
+        """
         response = self.gmail.users().labels().list(userId="me").execute()
         labels = response.get("labels", [])
 
@@ -445,8 +450,9 @@ class GmailSync:
             for label in labels
         ]
 
-        if label_data:
-            with self._get_conn() as conn, conn.cursor() as cur:
+        deleted_count = 0
+        with self._get_conn() as conn, conn.cursor() as cur:
+            if label_data:
                 execute_values(
                     cur,
                     """
@@ -460,9 +466,28 @@ class GmailSync:
                     """,
                     label_data,
                 )
-                conn.commit()
 
-        logger.info(f"Synced {len(labels)} labels to database")
+                # Remove stale labels that no longer exist in Gmail
+                api_label_ids = tuple(label["id"] for label in labels)
+                cur.execute(
+                    "DELETE FROM gmail_labels WHERE id NOT IN %s",
+                    (api_label_ids,),
+                )
+                deleted_count = cur.rowcount
+            else:
+                # No labels from API - clear the table
+                cur.execute("DELETE FROM gmail_labels")
+                deleted_count = cur.rowcount
+
+            conn.commit()
+
+        # Clear in-memory cache to force reload of fresh data
+        with self._label_cache_lock:
+            self._label_cache.clear()
+
+        logger.info(
+            f"Synced {len(labels)} labels to database, removed {deleted_count} stale"
+        )
 
     def _get_label_name(self, label_id: str) -> str | None:
         """Get label name from ID, using thread-safe database cache."""
