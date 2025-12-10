@@ -364,11 +364,11 @@ class GmailSync:
         parts = payload.get("parts")
         self._store_body_via_api(gmail_id, parts, body_data)
 
-        # All Postgres operations in one transaction
+        # All Postgres operations in one transaction with single cursor
         with self._get_conn() as conn:
             try:
-                # Store in Postgres
                 with conn.cursor() as cur:
+                    # Store in Postgres
                     cur.execute(
                         """
                         INSERT INTO emails_raw (
@@ -393,8 +393,7 @@ class GmailSync:
                         ),
                     )
 
-                # Enqueue for parsing
-                with conn.cursor() as cur:
+                    # Enqueue for parsing
                     cur.execute(
                         """
                         INSERT INTO queue (queue_name, payload)
@@ -403,16 +402,17 @@ class GmailSync:
                         (json.dumps({"gmail_id": gmail_id}),),
                     )
 
-                # Enqueue attachments for separate fetch
-                if attachment_ids:
-                    attachment_jobs = [
-                        (
-                            "attachment",
-                            json.dumps({"gmail_id": gmail_id, "attachment_id": att_id}),
-                        )
-                        for att_id in attachment_ids
-                    ]
-                    with conn.cursor() as cur:
+                    # Enqueue attachments for separate fetch
+                    if attachment_ids:
+                        attachment_jobs = [
+                            (
+                                "attachment",
+                                json.dumps(
+                                    {"gmail_id": gmail_id, "attachment_id": att_id}
+                                ),
+                            )
+                            for att_id in attachment_ids
+                        ]
                         execute_values(
                             cur,
                             "INSERT INTO queue (queue_name, payload) VALUES %s",
@@ -558,8 +558,8 @@ class GmailSync:
 
         with self._get_conn() as conn:
             try:
-                # Update label_ids array in emails_raw
                 with conn.cursor() as cur:
+                    # Update label_ids array in emails_raw
                     if event_type == "added":
                         # Add labels to array (avoiding duplicates)
                         # Use COALESCE to handle NULL label_ids
@@ -592,9 +592,8 @@ class GmailSync:
                             (label_ids, gmail_id),
                         )
 
-                # Bulk insert all actions
-                if actions_to_enqueue:
-                    with conn.cursor() as cur:
+                    # Bulk insert all actions
+                    if actions_to_enqueue:
                         execute_values(
                             cur,
                             "INSERT INTO queue (queue_name, payload) VALUES %s",
