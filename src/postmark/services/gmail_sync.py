@@ -325,6 +325,7 @@ class GmailSync:
     def store_raw_message(self, gmail_id: str) -> None:
         """Fetch and store raw message - no parsing, just slam it in.
 
+        Network calls (Gmail API, DuckDB API) happen before the transaction.
         All DB operations for a single message are in one transaction.
         Either everything succeeds or everything rolls back.
         """
@@ -332,6 +333,7 @@ class GmailSync:
             logger.debug(f"Message {gmail_id} already exists, skipping")
             return
 
+        # Fetch from Gmail API (outside transaction)
         msg = (
             self.gmail.users()
             .messages()
@@ -342,6 +344,13 @@ class GmailSync:
         payload = msg.get("payload", {})
         attachment_ids = self._extract_attachment_ids(payload)
 
+        # Store body via DuckDB API (outside transaction to avoid holding connections)
+        # If this fails, exception propagates and Pub/Sub message will be nack'd
+        body_data = payload.get("body", {}).get("data")
+        parts = payload.get("parts")
+        self._store_body_via_api(gmail_id, parts, body_data)
+
+        # All Postgres operations in one transaction
         with self._get_conn() as conn:
             try:
                 # Store in Postgres
@@ -369,11 +378,6 @@ class GmailSync:
                             json.dumps(self._strip_body(msg)),
                         ),
                     )
-
-                # Store body via DuckDB API
-                body_data = payload.get("body", {}).get("data")
-                parts = payload.get("parts")
-                self._store_body_via_api(gmail_id, parts, body_data)
 
                 # Enqueue for parsing
                 with conn.cursor() as cur:
