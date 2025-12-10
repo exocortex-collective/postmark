@@ -154,8 +154,12 @@ class GmailSync:
                     mime_type TEXT,
                     attachment_ids TEXT[],
                     raw_response JSONB,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    deleted_at TIMESTAMPTZ  -- Soft delete: set when message deleted from Gmail
                 );
+
+                -- Add deleted_at column if it doesn't exist (migration for existing tables)
+                ALTER TABLE emails_raw ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 
                 CREATE INDEX IF NOT EXISTS idx_emails_raw_gmail_id
                     ON emails_raw(gmail_id);
@@ -185,7 +189,7 @@ class GmailSync:
                     claimed_at TIMESTAMPTZ,
                     completed_at TIMESTAMPTZ,
                     CONSTRAINT valid_status CHECK (
-                        status IN ('pending', 'processing', 'completed', 'failed')
+                        status IN ('pending', 'processing', 'completed', 'failed', 'cancelled')
                     )
                 );
 
@@ -563,6 +567,49 @@ class GmailSync:
                 )
                 raise
 
+    def _process_message_deleted(self, gmail_id: str) -> None:
+        """Soft delete a message and cancel pending queue jobs.
+
+        Sets deleted_at timestamp on emails_raw and cancels any pending
+        queue jobs for this message. Preserves the email data for potential
+        future use (e.g., spam signal for classifier training).
+        """
+        with self._get_conn() as conn:
+            try:
+                with conn.cursor() as cur:
+                    # Soft delete the email
+                    cur.execute(
+                        "UPDATE emails_raw SET deleted_at = NOW() WHERE gmail_id = %s",
+                        (gmail_id,),
+                    )
+                    rows_updated = cur.rowcount
+
+                    # Cancel any pending queue jobs for this message
+                    cur.execute(
+                        """
+                        UPDATE queue SET status = 'cancelled'
+                        WHERE status = 'pending'
+                        AND payload->>'gmail_id' = %s
+                        """,
+                        (gmail_id,),
+                    )
+                    jobs_cancelled = cur.rowcount
+
+                conn.commit()
+
+                if rows_updated > 0:
+                    logger.info(
+                        f"Soft deleted message {gmail_id}, "
+                        f"cancelled {jobs_cancelled} pending jobs"
+                    )
+                else:
+                    logger.debug(f"Message {gmail_id} not found for soft delete")
+
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to soft delete {gmail_id}: {e}")
+                raise
+
     def process_notification(
         self, message: pubsub_v1.subscriber.message.Message
     ) -> None:
@@ -593,7 +640,12 @@ class GmailSync:
                     .list(
                         userId="me",
                         startHistoryId=last_history_id,
-                        historyTypes=["messageAdded", "labelAdded", "labelRemoved"],
+                        historyTypes=[
+                            "messageAdded",
+                            "messageDeleted",
+                            "labelAdded",
+                            "labelRemoved",
+                        ],
                     )
                     .execute()
                 )
@@ -614,6 +666,11 @@ class GmailSync:
                 for msg_added in record.get("messagesAdded", []):
                     msg_id = msg_added["message"]["id"]
                     self.store_raw_message(msg_id)
+
+                # Deleted messages - soft delete and cancel pending jobs
+                for msg_deleted in record.get("messagesDeleted", []):
+                    msg_id = msg_deleted["message"]["id"]
+                    self._process_message_deleted(msg_id)
 
                 # Label additions - enqueue Cortex/* labels for actions service
                 for label_added in record.get("labelsAdded", []):
