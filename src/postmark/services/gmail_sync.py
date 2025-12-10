@@ -553,14 +553,15 @@ class GmailSync:
                         )
                     else:  # removed
                         # Remove labels from array
+                        # Use COALESCE to return empty array instead of NULL
                         cur.execute(
                             """
                             UPDATE emails_raw
-                            SET label_ids = (
+                            SET label_ids = COALESCE((
                                 SELECT array_agg(elem)
                                 FROM unnest(label_ids) elem
                                 WHERE elem != ALL(%s::text[])
-                            )
+                            ), ARRAY[]::text[])
                             WHERE gmail_id = %s
                             """,
                             (label_ids, gmail_id),
