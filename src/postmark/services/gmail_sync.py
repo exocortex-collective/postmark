@@ -7,6 +7,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -17,6 +19,8 @@ from google.cloud import pubsub_v1
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from psycopg2.extras import execute_values
+from psycopg2.pool import ThreadedConnectionPool
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,6 +38,8 @@ class PostgresConfig:
     user: str
     password: str
     port: int = 5432
+    pool_min_conn: int = 1
+    pool_max_conn: int = 5
 
 
 @dataclass
@@ -62,6 +68,8 @@ class GmailSyncConfig:
                 dbname=os.environ["POSTGRES_DB"],
                 user=os.environ["POSTGRES_USER"],
                 password=os.environ["POSTGRES_PASSWORD"],
+                pool_min_conn=int(os.environ.get("POSTGRES_POOL_MIN", "1")),
+                pool_max_conn=int(os.environ.get("POSTGRES_POOL_MAX", "5")),
             ),
         )
 
@@ -71,6 +79,11 @@ class GmailSync:
 
     def __init__(self, config: GmailSyncConfig) -> None:
         self.config = config
+
+        # Thread-safe label cache with lock
+        self._label_cache: dict[str, str] = {}
+        self._label_cache_lock = threading.Lock()
+        self._label_sync_lock = threading.Lock()  # Prevents thundering herd on sync
 
         # Initialize clients
         self._init_gmail()
@@ -101,22 +114,36 @@ class GmailSync:
         )
 
     def _init_postgres(self) -> None:
-        """Initialize Postgres connection and ensure schema exists."""
+        """Initialize Postgres connection pool and ensure schema exists."""
         pg = self.config.postgres
-        self.pg_conn = psycopg2.connect(
+        self._pool = ThreadedConnectionPool(
+            minconn=pg.pool_min_conn,
+            maxconn=pg.pool_max_conn,
             host=pg.host,
             port=pg.port,
             dbname=pg.dbname,
             user=pg.user,
             password=pg.password,
         )
-        self.pg_conn.autocommit = True
-        self._ensure_postgres_schema()
-        logger.info("Postgres connection initialized")
+        # Ensure schema exists using a connection from the pool
+        with self._get_conn() as conn:
+            self._ensure_postgres_schema(conn)
+            conn.commit()
+        logger.info("Postgres connection pool initialized")
 
-    def _ensure_postgres_schema(self) -> None:
+    @contextmanager
+    def _get_conn(self) -> Iterator[psycopg2.extensions.connection]:
+        """Get a connection from the pool. Auto-returns on exit."""
+        conn = self._pool.getconn()
+        conn.autocommit = False
+        try:
+            yield conn
+        finally:
+            self._pool.putconn(conn)
+
+    def _ensure_postgres_schema(self, conn: psycopg2.extensions.connection) -> None:
         """Create tables if they don't exist."""
-        with self.pg_conn.cursor() as cur:
+        with conn.cursor() as cur:
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS emails_raw (
@@ -132,8 +159,12 @@ class GmailSync:
                     mime_type TEXT,
                     attachment_ids TEXT[],
                     raw_response JSONB,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    deleted_at TIMESTAMPTZ  -- Soft delete: set when message deleted from Gmail
                 );
+
+                -- Add deleted_at column if it doesn't exist (migration for existing tables)
+                ALTER TABLE emails_raw ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 
                 CREATE INDEX IF NOT EXISTS idx_emails_raw_gmail_id
                     ON emails_raw(gmail_id);
@@ -163,13 +194,36 @@ class GmailSync:
                     claimed_at TIMESTAMPTZ,
                     completed_at TIMESTAMPTZ,
                     CONSTRAINT valid_status CHECK (
-                        status IN ('pending', 'processing', 'completed', 'failed')
+                        status IN ('pending', 'processing', 'completed', 'failed', 'cancelled')
                     )
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_queue_pending
                     ON queue(queue_name, status, created_at)
                     WHERE status = 'pending';
+
+                -- Index for cancelling pending jobs by gmail_id (used in soft delete)
+                CREATE INDEX IF NOT EXISTS idx_queue_pending_gmail_id
+                    ON queue((payload->>'gmail_id'))
+                    WHERE status = 'pending';
+
+                -- Gmail labels cache (id -> name mapping)
+                -- name_parts stores hierarchical names as arrays for easy querying
+                -- e.g. "Cortex/Todo" -> ['Cortex', 'Todo']
+                CREATE TABLE IF NOT EXISTS gmail_labels (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,           -- Original name (e.g. "Cortex/Todo")
+                    name_parts TEXT[] NOT NULL,   -- Split hierarchy (e.g. ['Cortex', 'Todo'])
+                    type TEXT,  -- 'system' or 'user'
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_gmail_labels_name
+                    ON gmail_labels(name);
+
+                -- GIN index for efficient array queries (e.g. WHERE 'Cortex' = ANY(name_parts))
+                CREATE INDEX IF NOT EXISTS idx_gmail_labels_parts
+                    ON gmail_labels USING GIN(name_parts);
             """
             )
         logger.info("Postgres schema ensured")
@@ -208,7 +262,7 @@ class GmailSync:
 
     def _get_last_history_id(self, email_address: str) -> str | None:
         """Get last synced history ID for an email address."""
-        with self.pg_conn.cursor() as cur:
+        with self._get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT last_history_id FROM sync_state WHERE email_address = %s",
                 (email_address,),
@@ -218,7 +272,7 @@ class GmailSync:
 
     def _set_last_history_id(self, email_address: str, history_id: str) -> None:
         """Update last synced history ID."""
-        with self.pg_conn.cursor() as cur:
+        with self._get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO sync_state (email_address, last_history_id, last_sync_at)
@@ -228,10 +282,11 @@ class GmailSync:
                 """,
                 (email_address, history_id, history_id),
             )
+            conn.commit()
 
     def _email_exists(self, gmail_id: str) -> bool:
         """Check if email already exists in database."""
-        with self.pg_conn.cursor() as cur:
+        with self._get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT 1 FROM emails_raw WHERE gmail_id = %s",
                 (gmail_id,),
@@ -282,11 +337,17 @@ class GmailSync:
         return result
 
     def store_raw_message(self, gmail_id: str) -> None:
-        """Fetch and store raw message - no parsing, just slam it in."""
+        """Fetch and store raw message - no parsing, just slam it in.
+
+        Network calls (Gmail API, DuckDB API) happen before the transaction.
+        All DB operations for a single message are in one transaction.
+        Either everything succeeds or everything rolls back.
+        """
         if self._email_exists(gmail_id):
             logger.debug(f"Message {gmail_id} already exists, skipping")
             return
 
+        # Fetch from Gmail API (outside transaction)
         msg = (
             self.gmail.users()
             .messages()
@@ -297,59 +358,300 @@ class GmailSync:
         payload = msg.get("payload", {})
         attachment_ids = self._extract_attachment_ids(payload)
 
-        # Store in Postgres
-        with self.pg_conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO emails_raw (
-                    gmail_id, thread_id, history_id, label_ids,
-                    internal_date, size_estimate, snippet, headers,
-                    mime_type, attachment_ids, raw_response
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (gmail_id) DO NOTHING
-                """,
-                (
-                    gmail_id,
-                    msg["threadId"],
-                    msg.get("historyId", ""),
-                    msg.get("labelIds", []),
-                    int(msg["internalDate"]),
-                    msg.get("sizeEstimate"),
-                    msg.get("snippet", ""),
-                    json.dumps(payload.get("headers", [])),
-                    payload.get("mimeType"),
-                    attachment_ids,
-                    json.dumps(self._strip_body(msg)),
-                ),
-            )
-
-        # Store body via DuckDB API
+        # Store body via DuckDB API (outside transaction to avoid holding connections)
+        # If this fails, exception propagates and Pub/Sub message will be nack'd
         body_data = payload.get("body", {}).get("data")
         parts = payload.get("parts")
         self._store_body_via_api(gmail_id, parts, body_data)
 
-        # Enqueue for parsing
-        with self.pg_conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO queue (queue_name, payload)
-                VALUES ('parse', %s)
-                """,
-                (json.dumps({"gmail_id": gmail_id}),),
-            )
+        # All Postgres operations in one transaction with single cursor
+        with self._get_conn() as conn:
+            try:
+                with conn.cursor() as cur:
+                    # Store in Postgres
+                    cur.execute(
+                        """
+                        INSERT INTO emails_raw (
+                            gmail_id, thread_id, history_id, label_ids,
+                            internal_date, size_estimate, snippet, headers,
+                            mime_type, attachment_ids, raw_response
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (gmail_id) DO NOTHING
+                        """,
+                        (
+                            gmail_id,
+                            msg["threadId"],
+                            msg.get("historyId", ""),
+                            msg.get("labelIds", []),
+                            int(msg["internalDate"]),
+                            msg.get("sizeEstimate"),
+                            msg.get("snippet", ""),
+                            json.dumps(payload.get("headers", [])),
+                            payload.get("mimeType"),
+                            attachment_ids,
+                            json.dumps(self._strip_body(msg)),
+                        ),
+                    )
 
-        # Enqueue attachments for separate fetch
-        for att_id in attachment_ids:
-            with self.pg_conn.cursor() as cur:
-                cur.execute(
+                    # Enqueue for parsing
+                    cur.execute(
+                        """
+                        INSERT INTO queue (queue_name, payload)
+                        VALUES ('parse', %s)
+                        """,
+                        (json.dumps({"gmail_id": gmail_id}),),
+                    )
+
+                    # Enqueue attachments for separate fetch
+                    if attachment_ids:
+                        attachment_jobs = [
+                            (
+                                "attachment",
+                                json.dumps(
+                                    {"gmail_id": gmail_id, "attachment_id": att_id}
+                                ),
+                            )
+                            for att_id in attachment_ids
+                        ]
+                        execute_values(
+                            cur,
+                            "INSERT INTO queue (queue_name, payload) VALUES %s",
+                            attachment_jobs,
+                        )
+
+                # Commit the entire message transaction
+                conn.commit()
+                logger.info(f"Stored message {gmail_id}")
+
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to store message {gmail_id}, rolled back: {e}")
+                raise
+
+    def _sync_labels_to_db(self) -> None:
+        """Fetch all Gmail labels and sync to database.
+
+        This performs a full sync: adds/updates current labels and removes
+        any labels that no longer exist in Gmail. Also clears the in-memory
+        cache to ensure fresh data on subsequent lookups.
+        """
+        response = self.gmail.users().labels().list(userId="me").execute()
+        labels = response.get("labels", [])
+
+        # Build label data for bulk insert
+        # Split hierarchical names into parts (e.g. "Cortex/Todo" -> ["Cortex", "Todo"])
+        label_data = [
+            (
+                label["id"],
+                label["name"],
+                label["name"].split("/"),
+                label.get("type"),
+            )
+            for label in labels
+        ]
+
+        deleted_count = 0
+        with self._get_conn() as conn, conn.cursor() as cur:
+            if label_data:
+                execute_values(
+                    cur,
                     """
-                    INSERT INTO queue (queue_name, payload)
-                    VALUES ('attachment', %s)
+                    INSERT INTO gmail_labels (id, name, name_parts, type, updated_at)
+                    VALUES %s
+                    ON CONFLICT (id) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        name_parts = EXCLUDED.name_parts,
+                        type = EXCLUDED.type,
+                        updated_at = NOW()
                     """,
-                    (json.dumps({"gmail_id": gmail_id, "attachment_id": att_id}),),
+                    label_data,
                 )
 
-        logger.info(f"Stored message {gmail_id}")
+                # Remove stale labels that no longer exist in Gmail
+                api_label_ids = tuple(label["id"] for label in labels)
+                cur.execute(
+                    "DELETE FROM gmail_labels WHERE id NOT IN %s",
+                    (api_label_ids,),
+                )
+                deleted_count = cur.rowcount
+            else:
+                # No labels from API - clear the table
+                cur.execute("DELETE FROM gmail_labels")
+                deleted_count = cur.rowcount
+
+            conn.commit()
+
+        # Clear in-memory cache to force reload of fresh data
+        with self._label_cache_lock:
+            self._label_cache.clear()
+
+        logger.info(
+            f"Synced {len(labels)} labels to database, removed {deleted_count} stale"
+        )
+
+    def _get_label_name(self, label_id: str) -> str | None:
+        """Get label name from ID, using thread-safe database cache."""
+        # Check in-memory cache first (thread-safe read)
+        with self._label_cache_lock:
+            if label_id in self._label_cache:
+                return self._label_cache[label_id]
+
+        # Check database, with a retry after syncing if not found
+        for attempt in range(2):
+            with self._get_conn() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT name FROM gmail_labels WHERE id = %s",
+                    (label_id,),
+                )
+                row = cur.fetchone()
+                if row:
+                    name: str = row[0]
+                    with self._label_cache_lock:
+                        self._label_cache[label_id] = name
+                    return name
+
+            # If not found on first try, sync labels and loop to try again
+            if attempt == 0:
+                with self._label_sync_lock:
+                    # Re-check cache - another thread may have synced while we waited
+                    with self._label_cache_lock:
+                        if label_id in self._label_cache:
+                            return self._label_cache[label_id]
+                    self._sync_labels_to_db()
+
+        return None
+
+    def _process_label_event(
+        self, gmail_id: str, label_ids: list[str], event_type: str
+    ) -> None:
+        """Process label add/remove events.
+
+        Updates label_ids in emails_raw and enqueues Cortex/* label events
+        to the actions queue for workflow dispatch.
+
+        All operations are in one transaction - commit/rollback together.
+        """
+        if not label_ids:
+            return
+
+        # Collect Cortex/* labels for bulk enqueue to actions service
+        # (Do this first, before starting transaction, as it may call _sync_labels_to_db)
+        actions_to_enqueue = []
+        for label_id in label_ids:
+            label_name = self._get_label_name(label_id)
+            if label_name is None:
+                continue
+
+            # Only enqueue Cortex/* labels for workflow dispatch
+            if not label_name.startswith("Cortex/"):
+                continue
+
+            logger.info(f"Label {event_type}: {label_name} on message {gmail_id}")
+            payload = json.dumps(
+                {
+                    "gmail_id": gmail_id,
+                    "label": label_name,
+                    "event_type": event_type,
+                }
+            )
+            actions_to_enqueue.append(("actions", payload))
+
+        with self._get_conn() as conn:
+            try:
+                with conn.cursor() as cur:
+                    # Update label_ids array in emails_raw
+                    if event_type == "added":
+                        # Add labels to array (avoiding duplicates)
+                        # Use COALESCE to handle NULL label_ids
+                        cur.execute(
+                            """
+                            UPDATE emails_raw
+                            SET label_ids = (
+                                SELECT array_agg(DISTINCT elem)
+                                FROM unnest(
+                                    COALESCE(label_ids, ARRAY[]::text[]) || %s::text[]
+                                ) elem
+                            )
+                            WHERE gmail_id = %s
+                            """,
+                            (label_ids, gmail_id),
+                        )
+                    else:  # removed
+                        # Remove labels from array
+                        # Use COALESCE to return empty array instead of NULL
+                        cur.execute(
+                            """
+                            UPDATE emails_raw
+                            SET label_ids = COALESCE((
+                                SELECT array_agg(elem)
+                                FROM unnest(label_ids) elem
+                                WHERE elem != ALL(%s::text[])
+                            ), ARRAY[]::text[])
+                            WHERE gmail_id = %s
+                            """,
+                            (label_ids, gmail_id),
+                        )
+
+                    # Bulk insert all actions
+                    if actions_to_enqueue:
+                        execute_values(
+                            cur,
+                            "INSERT INTO queue (queue_name, payload) VALUES %s",
+                            actions_to_enqueue,
+                        )
+
+                # Commit the label event transaction
+                conn.commit()
+
+            except Exception as e:
+                conn.rollback()
+                logger.error(
+                    f"Failed to process label event for {gmail_id}, rolled back: {e}"
+                )
+                raise
+
+    def _process_message_deleted(self, gmail_id: str) -> None:
+        """Soft delete a message and cancel pending queue jobs.
+
+        Sets deleted_at timestamp on emails_raw and cancels any pending
+        queue jobs for this message. Preserves the email data for potential
+        future use (e.g., spam signal for classifier training).
+        """
+        with self._get_conn() as conn:
+            try:
+                with conn.cursor() as cur:
+                    # Soft delete the email
+                    cur.execute(
+                        "UPDATE emails_raw SET deleted_at = NOW() WHERE gmail_id = %s",
+                        (gmail_id,),
+                    )
+                    rows_updated = cur.rowcount
+
+                    # Cancel any pending queue jobs for this message
+                    cur.execute(
+                        """
+                        UPDATE queue SET status = 'cancelled'
+                        WHERE status = 'pending'
+                        AND payload->>'gmail_id' = %s
+                        """,
+                        (gmail_id,),
+                    )
+                    jobs_cancelled = cur.rowcount
+
+                conn.commit()
+
+                if rows_updated > 0:
+                    logger.info(
+                        f"Soft deleted message {gmail_id}, "
+                        f"cancelled {jobs_cancelled} pending jobs"
+                    )
+                else:
+                    logger.debug(f"Message {gmail_id} not found for soft delete")
+
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to soft delete {gmail_id}: {e}")
+                raise
 
     def process_notification(
         self, message: pubsub_v1.subscriber.message.Message
@@ -381,7 +683,12 @@ class GmailSync:
                     .list(
                         userId="me",
                         startHistoryId=last_history_id,
-                        historyTypes=["messageAdded"],
+                        historyTypes=[
+                            "messageAdded",
+                            "messageDeleted",
+                            "labelAdded",
+                            "labelRemoved",
+                        ],
                     )
                     .execute()
                 )
@@ -396,11 +703,29 @@ class GmailSync:
                     return
                 raise
 
-            # Process new messages
+            # Process history records
             for record in history_response.get("history", []):
+                # New messages
                 for msg_added in record.get("messagesAdded", []):
                     msg_id = msg_added["message"]["id"]
                     self.store_raw_message(msg_id)
+
+                # Deleted messages - soft delete and cancel pending jobs
+                for msg_deleted in record.get("messagesDeleted", []):
+                    msg_id = msg_deleted["message"]["id"]
+                    self._process_message_deleted(msg_id)
+
+                # Label additions - enqueue Cortex/* labels for actions service
+                for label_added in record.get("labelsAdded", []):
+                    msg_id = label_added["message"]["id"]
+                    label_ids = label_added.get("labelIds", [])
+                    self._process_label_event(msg_id, label_ids, "added")
+
+                # Label removals - track for corrections
+                for label_removed in record.get("labelsRemoved", []):
+                    msg_id = label_removed["message"]["id"]
+                    label_ids = label_removed.get("labelIds", [])
+                    self._process_label_event(msg_id, label_ids, "removed")
 
             # Update history ID
             new_id = history_response.get("historyId", new_history_id)
@@ -439,7 +764,7 @@ class GmailSync:
             # Get the actual email address for this user
             email_address = self._get_current_user_email()
 
-            with self.pg_conn.cursor() as cur:
+            with self._get_conn() as conn, conn.cursor() as cur:
                 # Check if user already has sync state
                 cur.execute(
                     "SELECT id FROM sync_state WHERE email_address = %s",
@@ -467,6 +792,7 @@ class GmailSync:
                     )
                     logger.info(f"New sync state created for {email_address}")
 
+                conn.commit()
             logger.info(
                 f"Watch renewed for {email_address}, expires at {expiration_dt}"
             )
