@@ -79,6 +79,7 @@ class GmailSync:
         # Thread-safe label cache with lock
         self._label_cache: dict[str, str] = {}
         self._label_cache_lock = threading.Lock()
+        self._label_sync_lock = threading.Lock()  # Prevents thundering herd on sync
 
         # Initialize clients
         self._init_gmail()
@@ -195,6 +196,11 @@ class GmailSync:
 
                 CREATE INDEX IF NOT EXISTS idx_queue_pending
                     ON queue(queue_name, status, created_at)
+                    WHERE status = 'pending';
+
+                -- Index for cancelling pending jobs by gmail_id (used in soft delete)
+                CREATE INDEX IF NOT EXISTS idx_queue_pending_gmail_id
+                    ON queue((payload->>'gmail_id'))
                     WHERE status = 'pending';
 
                 -- Gmail labels cache (id -> name mapping)
@@ -477,7 +483,12 @@ class GmailSync:
 
             # If not found on first try, sync labels and loop to try again
             if attempt == 0:
-                self._sync_labels_to_db()
+                with self._label_sync_lock:
+                    # Re-check cache - another thread may have synced while we waited
+                    with self._label_cache_lock:
+                        if label_id in self._label_cache:
+                            return self._label_cache[label_id]
+                    self._sync_labels_to_db()
 
         return None
 
