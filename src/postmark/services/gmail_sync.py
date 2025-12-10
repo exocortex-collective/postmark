@@ -38,6 +38,8 @@ class PostgresConfig:
     user: str
     password: str
     port: int = 5432
+    pool_min_conn: int = 1
+    pool_max_conn: int = 5
 
 
 @dataclass
@@ -66,6 +68,8 @@ class GmailSyncConfig:
                 dbname=os.environ["POSTGRES_DB"],
                 user=os.environ["POSTGRES_USER"],
                 password=os.environ["POSTGRES_PASSWORD"],
+                pool_min_conn=int(os.environ.get("POSTGRES_POOL_MIN", "1")),
+                pool_max_conn=int(os.environ.get("POSTGRES_POOL_MAX", "5")),
             ),
         )
 
@@ -113,8 +117,8 @@ class GmailSync:
         """Initialize Postgres connection pool and ensure schema exists."""
         pg = self.config.postgres
         self._pool = ThreadedConnectionPool(
-            minconn=1,
-            maxconn=5,
+            minconn=pg.pool_min_conn,
+            maxconn=pg.pool_max_conn,
             host=pg.host,
             port=pg.port,
             dbname=pg.dbname,
@@ -533,12 +537,15 @@ class GmailSync:
                 with conn.cursor() as cur:
                     if event_type == "added":
                         # Add labels to array (avoiding duplicates)
+                        # Use COALESCE to handle NULL label_ids
                         cur.execute(
                             """
                             UPDATE emails_raw
                             SET label_ids = (
                                 SELECT array_agg(DISTINCT elem)
-                                FROM unnest(label_ids || %s::text[]) elem
+                                FROM unnest(
+                                    COALESCE(label_ids, ARRAY[]::text[]) || %s::text[]
+                                ) elem
                             )
                             WHERE gmail_id = %s
                             """,
