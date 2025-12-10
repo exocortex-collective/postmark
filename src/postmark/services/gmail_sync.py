@@ -17,6 +17,7 @@ from google.cloud import pubsub_v1
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from psycopg2.extras import execute_values
 
 logging.basicConfig(
     level=logging.INFO,
@@ -374,24 +375,34 @@ class GmailSync:
         response = self.gmail.users().labels().list(userId="me").execute()
         labels = response.get("labels", [])
 
-        with self.pg_conn.cursor() as cur:
-            for label in labels:
-                name = label["name"]
-                # Split hierarchical name into parts (e.g. "Cortex/Todo" -> ["Cortex", "Todo"])
-                name_parts = name.split("/")
-                cur.execute(
+        # Build label data for bulk insert
+        # Split hierarchical names into parts (e.g. "Cortex/Todo" -> ["Cortex", "Todo"])
+        label_data = [
+            (
+                label["id"],
+                label["name"],
+                label["name"].split("/"),
+                label.get("type"),
+            )
+            for label in labels
+        ]
+
+        if label_data:
+            with self.pg_conn.cursor() as cur:
+                execute_values(
+                    cur,
                     """
                     INSERT INTO gmail_labels (id, name, name_parts, type, updated_at)
-                    VALUES (%s, %s, %s, %s, NOW())
+                    VALUES %s
                     ON CONFLICT (id) DO UPDATE SET
                         name = EXCLUDED.name,
                         name_parts = EXCLUDED.name_parts,
                         type = EXCLUDED.type,
                         updated_at = NOW()
                     """,
-                    (label["id"], name, name_parts, label.get("type")),
+                    label_data,
                 )
-        self.pg_conn.commit()
+
         logger.info(f"Synced {len(labels)} labels to database")
 
     def _get_label_name(self, label_id: str) -> str | None:
@@ -403,30 +414,22 @@ class GmailSync:
         if label_id in self._label_cache:
             return self._label_cache[label_id]
 
-        # Check database
-        with self.pg_conn.cursor() as cur:
-            cur.execute(
-                "SELECT name FROM gmail_labels WHERE id = %s",
-                (label_id,),
-            )
-            row = cur.fetchone()
-            if row:
-                name: str = row[0]
-                self._label_cache[label_id] = name
-                return name
+        # Check database, with a retry after syncing if not found
+        for attempt in range(2):
+            with self.pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT name FROM gmail_labels WHERE id = %s",
+                    (label_id,),
+                )
+                row = cur.fetchone()
+                if row:
+                    name: str = row[0]
+                    self._label_cache[label_id] = name
+                    return name
 
-        # Not in DB - sync labels and try again
-        self._sync_labels_to_db()
-        with self.pg_conn.cursor() as cur:
-            cur.execute(
-                "SELECT name FROM gmail_labels WHERE id = %s",
-                (label_id,),
-            )
-            row = cur.fetchone()
-            if row:
-                name = row[0]
-                self._label_cache[label_id] = name
-                return name
+            # If not found on first try, sync labels and loop to try again
+            if attempt == 0:
+                self._sync_labels_to_db()
 
         return None
 
@@ -470,9 +473,9 @@ class GmailSync:
                     """,
                     (label_ids, gmail_id),
                 )
-        self.pg_conn.commit()
 
-        # Enqueue Cortex/* labels for actions service
+        # Collect Cortex/* labels for bulk enqueue to actions service
+        actions_to_enqueue = []
         for label_id in label_ids:
             label_name = self._get_label_name(label_id)
             if label_name is None:
@@ -483,24 +486,23 @@ class GmailSync:
                 continue
 
             logger.info(f"Label {event_type}: {label_name} on message {gmail_id}")
+            payload = json.dumps(
+                {
+                    "gmail_id": gmail_id,
+                    "label": label_name,
+                    "event_type": event_type,
+                }
+            )
+            actions_to_enqueue.append(("actions", payload))
 
+        # Bulk insert all actions
+        if actions_to_enqueue:
             with self.pg_conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO queue (queue_name, payload)
-                    VALUES ('actions', %s)
-                    """,
-                    (
-                        json.dumps(
-                            {
-                                "gmail_id": gmail_id,
-                                "label": label_name,
-                                "event_type": event_type,
-                            }
-                        ),
-                    ),
+                execute_values(
+                    cur,
+                    "INSERT INTO queue (queue_name, payload) VALUES %s",
+                    actions_to_enqueue,
                 )
-            self.pg_conn.commit()
 
     def process_notification(
         self, message: pubsub_v1.subscriber.message.Message
