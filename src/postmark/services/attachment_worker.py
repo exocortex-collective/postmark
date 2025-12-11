@@ -27,6 +27,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# How long a job can be in 'processing' before it's considered stale
+# and reset to 'pending' (visibility timeout)
+VISIBILITY_TIMEOUT_MINUTES = 5
+
 
 @dataclass
 class Config:
@@ -151,7 +155,7 @@ class AttachmentWorker:
                     SET status = 'pending', claimed_at = NULL
                     WHERE queue_name = 'attachment'
                       AND status = 'processing'
-                      AND claimed_at < NOW() - INTERVAL '5 minutes'
+                      AND claimed_at < NOW() - INTERVAL '%s minutes'
                 ),
                 claimable AS (
                     SELECT id FROM queue
@@ -165,7 +169,7 @@ class AttachmentWorker:
                 WHERE id IN (SELECT id FROM claimable)
                 RETURNING id, payload
                 """,
-                (batch_size,),
+                (VISIBILITY_TIMEOUT_MINUTES, batch_size),
             )
             jobs = [{"id": row[0], "payload": row[1]} for row in cur.fetchall()]
             conn.commit()
