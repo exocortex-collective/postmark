@@ -46,6 +46,8 @@ class ParseWorker:
         self._pg_conn: psycopg2.extensions.connection | None = None
         self._gmail: Any = None
         self._label_cache: set[str] = set()  # Known label IDs in gmail_labels
+        self._last_label_sync: float = 0  # Timestamp of last Gmail API label sync
+        self._label_sync_interval: float = 60.0  # Min seconds between API syncs
 
     def _get_pg_conn(self) -> psycopg2.extensions.connection:
         if self._pg_conn is None or self._pg_conn.closed:
@@ -86,6 +88,7 @@ class ParseWorker:
         """Ensure all label_ids exist in gmail_labels table.
 
         Checks cache first, then fetches missing labels from Gmail API.
+        Rate-limited to avoid excessive API calls.
         """
         if not label_ids:
             return
@@ -95,14 +98,25 @@ class ParseWorker:
         if not missing:
             return
 
+        # Rate limit: skip API call if we synced recently
+        now = time.time()
+        if now - self._last_label_sync < self._label_sync_interval:
+            logger.debug(
+                f"Skipping label sync, {len(missing)} labels missing but "
+                f"synced {now - self._last_label_sync:.0f}s ago"
+            )
+            return
+
         # Fetch all labels from Gmail API (more efficient than individual lookups)
         gmail = self._get_gmail()
         response = gmail.users().labels().list(userId="me").execute()
         api_labels = response.get("labels", [])
+        self._last_label_sync = time.time()
 
         # Build lookup and data for insert
         api_label_map = {label["id"]: label for label in api_labels}
         labels_to_insert = []
+        not_found = []
 
         for label_id in missing:
             if label_id in api_label_map:
@@ -115,7 +129,13 @@ class ParseWorker:
                         label.get("type"),
                     )
                 )
-            # If label_id not in API response, it may have been deleted - skip it
+            else:
+                not_found.append(label_id)
+
+        if not_found:
+            logger.warning(
+                f"Labels not found in Gmail API (possibly deleted): {not_found}"
+            )
 
         if labels_to_insert:
             conn = self._get_pg_conn()
@@ -135,11 +155,12 @@ class ParseWorker:
                 )
                 conn.commit()
 
-            # Update cache
-            for label_id, _, _, _ in labels_to_insert:
-                self._label_cache.add(label_id)
-
             logger.info(f"Synced {len(labels_to_insert)} new labels to gmail_labels")
+
+        # Update cache with ALL labels from API (not just missing ones)
+        # This ensures future lookups benefit from the full sync
+        for label in api_labels:
+            self._label_cache.add(label["id"])
 
     def _ensure_schema(self) -> None:
         """Ensure emails_parsed table exists."""
