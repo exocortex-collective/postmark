@@ -4,8 +4,11 @@ Provides centralized read/write access to DuckDB, solving concurrency issues
 since DuckDB doesn't support multiple concurrent connections.
 """
 
+import base64
+import html
 import json
 import os
+import re
 import threading
 from contextlib import asynccontextmanager
 from typing import Any
@@ -18,6 +21,96 @@ from pydantic import BaseModel
 DUCKDB_PATH = os.environ.get("DUCKDB_PATH", "/app/data/emails.duckdb")
 HOST = os.environ.get("DUCKDB_API_HOST", "0.0.0.0")
 PORT = int(os.environ.get("DUCKDB_API_PORT", "8081"))
+
+
+def _decode_base64_urlsafe(data: str) -> str:
+    """Decode base64 URL-safe encoded data (Gmail API format)."""
+    # Gmail uses URL-safe base64 without padding
+    # Add padding if needed
+    padded = data + "=" * (4 - len(data) % 4) if len(data) % 4 else data
+    try:
+        return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _strip_html(html_content: str) -> str:
+    """Strip HTML tags and decode entities to get plain text."""
+    # Remove script and style elements
+    text = re.sub(
+        r"<script[^>]*>.*?</script>", "", html_content, flags=re.DOTALL | re.IGNORECASE
+    )
+    text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    # Replace br and p tags with newlines
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</p>", "\n", text, flags=re.IGNORECASE)
+    # Remove all other HTML tags
+    text = re.sub(r"<[^>]+>", "", text)
+    # Decode HTML entities
+    text = html.unescape(text)
+    # Collapse multiple whitespace
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
+    return text.strip()
+
+
+def _extract_body_text(parts: Any) -> str | None:
+    """Extract plain text body from Gmail message parts.
+
+    Looks for text/plain first, falls back to text/html (stripped).
+    Handles nested multipart messages.
+    """
+    if not parts:
+        return None
+
+    # If parts is a list, search through parts
+    if isinstance(parts, list):
+        # First pass: look for text/plain
+        for part in parts:
+            mime_type = part.get("mimeType", "")
+            if mime_type == "text/plain":
+                body_data = part.get("body", {}).get("data")
+                if body_data:
+                    return _decode_base64_urlsafe(body_data)
+            # Recurse into multipart
+            nested_parts = part.get("parts")
+            if nested_parts:
+                result = _extract_body_text(nested_parts)
+                if result:
+                    return result
+
+        # Second pass: fall back to text/html
+        for part in parts:
+            mime_type = part.get("mimeType", "")
+            if mime_type == "text/html":
+                body_data = part.get("body", {}).get("data")
+                if body_data:
+                    html_content = _decode_base64_urlsafe(body_data)
+                    return _strip_html(html_content)
+            # Recurse into multipart for html
+            nested_parts = part.get("parts")
+            if nested_parts:
+                result = _extract_body_text(nested_parts)
+                if result:
+                    return result
+
+    # If parts is a dict (single part), check directly
+    elif isinstance(parts, dict):
+        mime_type = parts.get("mimeType", "")
+        body_data = parts.get("body", {}).get("data")
+        if body_data:
+            if mime_type == "text/plain":
+                return _decode_base64_urlsafe(body_data)
+            elif mime_type == "text/html":
+                html_content = _decode_base64_urlsafe(body_data)
+                return _strip_html(html_content)
+        # Check nested parts
+        nested_parts = parts.get("parts")
+        if nested_parts:
+            return _extract_body_text(nested_parts)
+
+    return None
+
 
 # Single connection with lock for thread safety
 _conn: duckdb.DuckDBPyConnection | None = None
@@ -72,6 +165,7 @@ class BodyResponse(BaseModel):
     gmail_id: str
     parts: Any = None
     body_data: str | None = None
+    body_text: str | None = None  # Decoded plain text (extracted from parts)
 
 
 class StatusResponse(BaseModel):
@@ -89,6 +183,11 @@ class BodiesResponse(BaseModel):
 class GmailIdsResponse(BaseModel):
     gmail_ids: list[str]
     count: int
+
+
+class MailTextResponse(BaseModel):
+    gmail_id: str
+    text: str | None  # Plain text body (rendered from HTML if no plain text part)
 
 
 @app.get("/health", response_model=StatusResponse)
@@ -148,11 +247,41 @@ def get_body(
 
     # Deserialize JSON parts for cleaner API response
     parts_data = json.loads(result[0]) if result[0] else None
+    # Extract decoded body text from parts
+    body_text = _extract_body_text(parts_data)
     return BodyResponse(
         gmail_id=gmail_id,
         parts=parts_data,
         body_data=result[1],
+        body_text=body_text,
     )
+
+
+@app.get("/mail_text", response_model=MailTextResponse)
+def get_mail_text(
+    gmail_id: str = Query(..., description="Gmail message ID")
+) -> MailTextResponse:
+    """Get plain text content of an email.
+
+    Returns decoded plain text body. If the email has only HTML, the HTML
+    is rendered to plain text (tags stripped, entities decoded).
+    This is the preferred endpoint for downstream text processing.
+    """
+    with _lock:
+        conn = get_connection()
+        result = conn.execute(
+            "SELECT parts FROM email_bodies WHERE gmail_id = ?",
+            [gmail_id],
+        ).fetchone()
+
+    if not result:
+        raise HTTPException(
+            status_code=404, detail=f"No body found for gmail_id: {gmail_id}"
+        )
+
+    parts_data = json.loads(result[0]) if result[0] else None
+    text = _extract_body_text(parts_data)
+    return MailTextResponse(gmail_id=gmail_id, text=text)
 
 
 @app.get("/bodies", response_model=BodiesResponse)
@@ -174,14 +303,15 @@ def get_bodies(
             id_list,
         ).fetchall()
 
-    # Deserialize JSON parts for cleaner API response
-    bodies = {
-        row[0]: {
-            "parts": json.loads(row[1]) if row[1] else None,
+    # Deserialize JSON parts and extract body text
+    bodies = {}
+    for row in rows:
+        parts_data = json.loads(row[1]) if row[1] else None
+        bodies[row[0]] = {
+            "parts": parts_data,
             "body_data": row[2],
+            "body_text": _extract_body_text(parts_data),
         }
-        for row in rows
-    }
     return BodiesResponse(bodies=bodies)
 
 
