@@ -100,8 +100,10 @@ uv run isort .
 
 **All changes must go through PRs - never push directly to main.**
 
+**Important:** Pre-commit hooks require the virtualenv. Always use `uv run git commit` instead of bare `git commit`.
+
 1. Create a feature branch: `git checkout -b feature-name`
-2. Make changes and commit
+2. Make changes and commit: `uv run git commit -m "message"`
 3. Push branch and create PR: `git push -u origin feature-name && gh pr create`
 4. Wait for CI to pass
 5. Merge via GitHub (squash or merge commit)
