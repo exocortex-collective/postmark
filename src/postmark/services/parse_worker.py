@@ -204,23 +204,35 @@ class ParseWorker:
         logger.info("emails_parsed schema ensured")
 
     def _claim_jobs(self, batch_size: int) -> list[dict[str, Any]]:
-        """Claim a batch of pending parse jobs."""
+        """Claim a batch of pending parse jobs.
+
+        Also resets stale jobs that have been processing for too long
+        (visibility timeout), handling crashed/killed workers.
+        """
         conn = self._get_pg_conn()
         with conn.cursor() as cur:
-            # Claim jobs atomically
+            # Reset stale jobs and claim new ones in a single transaction
             cur.execute(
                 """
-                UPDATE queue
-                SET status = 'processing', claimed_at = NOW()
-                WHERE id IN (
+                WITH reset_stale AS (
+                    UPDATE queue
+                    SET status = 'pending', claimed_at = NULL
+                    WHERE queue_name = 'parse'
+                      AND status = 'processing'
+                      AND claimed_at < NOW() - INTERVAL '5 minutes'
+                ),
+                claimable AS (
                     SELECT id FROM queue
                     WHERE queue_name = 'parse' AND status = 'pending'
                     ORDER BY created_at
                     LIMIT %s
                     FOR UPDATE SKIP LOCKED
                 )
+                UPDATE queue
+                SET status = 'processing', claimed_at = NOW()
+                WHERE id IN (SELECT id FROM claimable)
                 RETURNING id, payload
-            """,
+                """,
                 (batch_size,),
             )
             jobs = [{"id": row[0], "payload": row[1]} for row in cur.fetchall()]
