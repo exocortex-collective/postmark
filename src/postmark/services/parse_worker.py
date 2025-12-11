@@ -63,15 +63,9 @@ class ParseWorker:
     def _get_gmail(self) -> Any:
         """Get Gmail API client, initializing if needed."""
         if self._gmail is None:
-            with open(self.config.gmail_token_path) as f:
+            with open(self.config.gmail_token_path, encoding="utf-8") as f:
                 token_data = json.load(f)
-            creds = Credentials(
-                token=token_data["token"],
-                refresh_token=token_data["refresh_token"],
-                token_uri=token_data["token_uri"],
-                client_id=token_data["client_id"],
-                client_secret=token_data["client_secret"],
-            )
+            creds = Credentials.from_authorized_user_info(token_data)
             self._gmail = build("gmail", "v1", credentials=creds, cache_discovery=False)
             logger.info("Gmail API client initialized")
         return self._gmail
@@ -93,8 +87,8 @@ class ParseWorker:
         if not label_ids:
             return
 
-        # Find labels not in cache
-        missing = [lid for lid in label_ids if lid not in self._label_cache]
+        # Find labels not in cache (set difference is more efficient)
+        missing = list(set(label_ids) - self._label_cache)
         if not missing:
             return
 
@@ -111,7 +105,6 @@ class ParseWorker:
         gmail = self._get_gmail()
         response = gmail.users().labels().list(userId="me").execute()
         api_labels = response.get("labels", [])
-        self._last_label_sync = time.time()
 
         # Build lookup and data for insert
         api_label_map = {label["id"]: label for label in api_labels}
@@ -157,10 +150,12 @@ class ParseWorker:
 
             logger.info(f"Synced {len(labels_to_insert)} new labels to gmail_labels")
 
+        # Update timestamp only after successful DB commit for robustness
+        self._last_label_sync = time.time()
+
         # Update cache with ALL labels from API (not just missing ones)
         # This ensures future lookups benefit from the full sync
-        for label in api_labels:
-            self._label_cache.add(label["id"])
+        self._label_cache.update(label["id"] for label in api_labels)
 
     def _ensure_schema(self) -> None:
         """Ensure emails_parsed table exists."""
