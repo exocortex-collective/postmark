@@ -223,7 +223,7 @@ class ParseWorker:
                     SET status = 'pending', claimed_at = NULL
                     WHERE queue_name = 'parse'
                       AND status = 'processing'
-                      AND claimed_at < NOW() - INTERVAL '%s minutes'
+                      AND claimed_at < NOW() - (INTERVAL '1 minute' * %s)
                 ),
                 claimable AS (
                     SELECT id FROM queue

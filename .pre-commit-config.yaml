@@ -6,7 +6,9 @@ repos:
     rev: v4.4.0
     hooks:
       - id: trailing-whitespace
+        exclude: '\.md$'
       - id: end-of-file-fixer
+        exclude: '\.md$'
       - id: check-yaml
       - id: check-added-large-files
       - id: check-merge-conflict
@@ -28,12 +30,13 @@ repos:
       - id: mypy
         additional_dependencies: [types-requests, types-boto3, fastapi, pydantic]
         args: [--ignore-missing-imports]
+        exclude: '^(src/postmark/archive/|tests/)'
 
   - repo: local
     hooks:
       - id: pytest
         name: pytest
-        entry: pytest
+        entry: uv run pytest
         language: system
         pass_filenames: false
         always_run: true
