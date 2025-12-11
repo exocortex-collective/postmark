@@ -2,6 +2,7 @@
 """Parse worker service - processes raw emails from queue into structured data."""
 
 import argparse
+import json
 import logging
 import os
 import signal
@@ -11,7 +12,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg2
-from psycopg2.extras import Json
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from psycopg2.extras import Json, execute_values
 
 from postmark.email.gmail_parser import ParsedEmail, parse_gmail_message
 from postmark.storage.duckdb_client import get_body_data_from_api
@@ -31,6 +34,7 @@ class Config:
     postgres_user: str
     postgres_password: str
     duckdb_api_url: str
+    gmail_token_path: str
     batch_size: int = 100
     poll_interval: int = 5  # seconds between queue polls when empty
 
@@ -40,6 +44,8 @@ class ParseWorker:
         self.config = config
         self.running = True
         self._pg_conn: psycopg2.extensions.connection | None = None
+        self._gmail: Any = None
+        self._label_cache: set[str] = set()  # Known label IDs in gmail_labels
 
     def _get_pg_conn(self) -> psycopg2.extensions.connection:
         if self._pg_conn is None or self._pg_conn.closed:
@@ -51,6 +57,89 @@ class ParseWorker:
                 password=self.config.postgres_password,
             )
         return self._pg_conn
+
+    def _get_gmail(self) -> Any:
+        """Get Gmail API client, initializing if needed."""
+        if self._gmail is None:
+            with open(self.config.gmail_token_path) as f:
+                token_data = json.load(f)
+            creds = Credentials(
+                token=token_data["token"],
+                refresh_token=token_data["refresh_token"],
+                token_uri=token_data["token_uri"],
+                client_id=token_data["client_id"],
+                client_secret=token_data["client_secret"],
+            )
+            self._gmail = build("gmail", "v1", credentials=creds, cache_discovery=False)
+            logger.info("Gmail API client initialized")
+        return self._gmail
+
+    def _load_known_labels(self) -> None:
+        """Load existing label IDs from gmail_labels into cache."""
+        conn = self._get_pg_conn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM gmail_labels")
+            self._label_cache = {row[0] for row in cur.fetchall()}
+        logger.info(f"Loaded {len(self._label_cache)} known labels into cache")
+
+    def _sync_labels(self, label_ids: list[str]) -> None:
+        """Ensure all label_ids exist in gmail_labels table.
+
+        Checks cache first, then fetches missing labels from Gmail API.
+        """
+        if not label_ids:
+            return
+
+        # Find labels not in cache
+        missing = [lid for lid in label_ids if lid not in self._label_cache]
+        if not missing:
+            return
+
+        # Fetch all labels from Gmail API (more efficient than individual lookups)
+        gmail = self._get_gmail()
+        response = gmail.users().labels().list(userId="me").execute()
+        api_labels = response.get("labels", [])
+
+        # Build lookup and data for insert
+        api_label_map = {label["id"]: label for label in api_labels}
+        labels_to_insert = []
+
+        for label_id in missing:
+            if label_id in api_label_map:
+                label = api_label_map[label_id]
+                labels_to_insert.append(
+                    (
+                        label["id"],
+                        label["name"],
+                        label["name"].split("/"),
+                        label.get("type"),
+                    )
+                )
+            # If label_id not in API response, it may have been deleted - skip it
+
+        if labels_to_insert:
+            conn = self._get_pg_conn()
+            with conn.cursor() as cur:
+                execute_values(
+                    cur,
+                    """
+                    INSERT INTO gmail_labels (id, name, name_parts, type)
+                    VALUES %s
+                    ON CONFLICT (id) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        name_parts = EXCLUDED.name_parts,
+                        type = EXCLUDED.type,
+                        updated_at = NOW()
+                    """,
+                    labels_to_insert,
+                )
+                conn.commit()
+
+            # Update cache
+            for label_id, _, _, _ in labels_to_insert:
+                self._label_cache.add(label_id)
+
+            logger.info(f"Synced {len(labels_to_insert)} new labels to gmail_labels")
 
     def _ensure_schema(self) -> None:
         """Ensure emails_parsed table exists."""
@@ -128,7 +217,8 @@ class ParseWorker:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT gmail_id, thread_id, headers, internal_date, snippet, mime_type
+                SELECT gmail_id, thread_id, headers, internal_date, snippet, mime_type,
+                       label_ids
                 FROM emails_raw
                 WHERE gmail_id = %s
             """,
@@ -143,6 +233,7 @@ class ParseWorker:
                     "internal_date": row[3],
                     "snippet": row[4],
                     "mime_type": row[5],
+                    "label_ids": row[6] or [],
                 }
         return None
 
@@ -245,6 +336,9 @@ class ParseWorker:
                 self._fail_job(job["id"], "Raw email not found")
                 return False
 
+            # Ensure all labels for this email exist in gmail_labels
+            self._sync_labels(raw["label_ids"])
+
             # Get body data from DuckDB API
             body_data = get_body_data_from_api(self.config.duckdb_api_url, gmail_id)
 
@@ -270,6 +364,7 @@ class ParseWorker:
     def run(self) -> None:
         """Main processing loop."""
         self._ensure_schema()
+        self._load_known_labels()
 
         logger.info("Parse worker started")
 
@@ -303,6 +398,7 @@ class ParseWorker:
     def run_once(self) -> tuple[int, int]:
         """Process all pending jobs once, then exit. Returns (processed, failed)."""
         self._ensure_schema()
+        self._load_known_labels()
 
         logger.info("Parse worker running once")
 
@@ -354,6 +450,7 @@ def main() -> None:
         "POSTGRES_USER",
         "POSTGRES_PASSWORD",
         "DUCKDB_API_URL",
+        "GMAIL_TOKEN_PATH",
     ]
     missing = [v for v in required_vars if not os.environ.get(v)]
     if missing:
@@ -368,6 +465,7 @@ def main() -> None:
         postgres_user=os.environ["POSTGRES_USER"],
         postgres_password=os.environ["POSTGRES_PASSWORD"],
         duckdb_api_url=os.environ["DUCKDB_API_URL"],
+        gmail_token_path=os.environ["GMAIL_TOKEN_PATH"],
         batch_size=args.batch_size,
     )
 
