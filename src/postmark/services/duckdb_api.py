@@ -6,7 +6,9 @@ since DuckDB doesn't support multiple concurrent connections.
 
 import base64
 import json
+import logging
 import os
+import re
 import threading
 from contextlib import asynccontextmanager
 from typing import Any
@@ -17,16 +19,19 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
+logger = logging.getLogger(__name__)
+
 DUCKDB_PATH = os.environ.get("DUCKDB_PATH", "/app/data/emails.duckdb")
 HOST = os.environ.get("DUCKDB_API_HOST", "0.0.0.0")
 PORT = int(os.environ.get("DUCKDB_API_PORT", "8081"))
 
-# Configure html2text for clean plain text output
+# Configure html2text for clean markdown output
 _html2text = html2text.HTML2Text()
-_html2text.ignore_links = False  # Keep link URLs inline
-_html2text.ignore_images = True
-_html2text.ignore_emphasis = True  # Don't add * for bold/italic
+_html2text.ignore_links = False  # Keep link URLs as markdown [text](url)
+_html2text.ignore_images = True  # Skip image references
+_html2text.ignore_emphasis = False  # Keep **bold** and *italic* markdown
 _html2text.body_width = 0  # Don't wrap lines
+_html2text.single_line_break = True  # More compact output
 
 
 def _decode_base64_urlsafe(data: str) -> str:
@@ -40,17 +45,68 @@ def _decode_base64_urlsafe(data: str) -> str:
         return ""
 
 
-def _html_to_text(html_content: str) -> str:
-    """Convert HTML to plain text using html2text."""
+def _html_to_markdown(html_content: str) -> str:
+    """Convert HTML to markdown using html2text."""
     result: str = _html2text.handle(html_content)
     return result.strip()
 
 
-def _extract_body_text(parts: Any) -> str | None:
-    """Extract plain text body from Gmail message parts.
+def _looks_like_html(text: str) -> bool:
+    """Check if text appears to contain significant HTML markup.
 
-    Looks for text/plain first, falls back to text/html (stripped).
+    Some email senders incorrectly label HTML content as text/plain.
+    This detects that case so we can run the content through html2text.
+
+    Uses conservative thresholds to avoid false positives:
+    - Minimum 50 chars (very short text can't be meaningful HTML)
+    - Check first 2KB only (enough to detect structure, avoids scanning huge emails)
+    - Require 3+ HTML tags (avoids false positives like "value < 10" or XML snippets)
+    - Require 2+ HTML-specific indicators (distinguishes from generic angle brackets)
+    """
+    # Minimum length check - very short text can't be meaningful HTML
+    if not text or len(text) < 50:
+        return False
+
+    # Fast path: if no angle brackets, definitely not HTML
+    sample = text[:2000]
+    if "<" not in sample:
+        return False
+
+    # Count HTML-like tags (require 3+ to avoid false positives)
+    tags = re.findall(r"<[a-zA-Z][^>]*>", sample)
+    if len(tags) < 3:
+        return False
+
+    # Check for HTML-specific patterns (require 2+ indicators)
+    html_indicators = [
+        "<!DOCTYPE",
+        "<html",
+        "<body",
+        "<div",
+        "<span",
+        "<table",
+        "<p>",
+        "<br",
+        'class="',
+        'style="',
+    ]
+    sample_lower = sample.lower()
+    indicator_count = sum(1 for ind in html_indicators if ind.lower() in sample_lower)
+
+    # Both conditions must be met to classify as HTML
+    return len(tags) >= 3 and indicator_count >= 2
+
+
+def _extract_body_text(parts: Any) -> str | None:
+    """Extract text body from Gmail message parts (markdown format).
+
+    Looks for text/plain first, falls back to text/html (converted to markdown).
     Handles nested multipart messages using iterative DFS.
+
+    Some email senders incorrectly label HTML content as text/plain.
+    We detect this and convert it properly using html2text.
+
+    Returns markdown-formatted text (preserving bold/italic/links).
     """
     if not parts:
         return None
@@ -76,22 +132,36 @@ def _extract_body_text(parts: Any) -> str | None:
         mime_type = part.get("mimeType", "")
         if mime_type == "text/plain":
             body_data = part.get("body", {}).get("data")
-            if body_data:
+            # Use first text/plain part found (don't overwrite with later parts)
+            if body_data and not plain_body_data:
                 plain_body_data = body_data
-                break  # Found plain text, preferred format - stop search
 
         elif mime_type == "text/html" and not html_body_data:
-            # Store first HTML part as fallback
+            # Store first HTML part as fallback if no plain text
             body_data = part.get("body", {}).get("data")
             if body_data:
                 html_body_data = body_data
 
     if plain_body_data:
-        return _decode_base64_urlsafe(plain_body_data)
+        plain_text = _decode_base64_urlsafe(plain_body_data)
+        # Check if "plain" text is actually mislabeled HTML
+        if _looks_like_html(plain_text):
+            try:
+                return _html_to_markdown(plain_text)
+            except Exception:
+                logger.warning(
+                    "html2text failed on mislabeled HTML, returning raw text"
+                )
+                return plain_text
+        return plain_text
 
     if html_body_data:
         html_content = _decode_base64_urlsafe(html_body_data)
-        return _html_to_text(html_content)
+        try:
+            return _html_to_markdown(html_content)
+        except Exception:
+            logger.warning("html2text failed on HTML content, returning None")
+            return None
 
     return None
 
@@ -253,10 +323,11 @@ def get_body(
 def get_mail_text(
     gmail_id: str = Query(..., description="Gmail message ID")
 ) -> MailTextResponse:
-    """Get plain text content of an email.
+    """Get text content of an email (markdown format).
 
-    Returns decoded plain text body. If the email has only HTML, the HTML
-    is rendered to plain text (tags stripped, entities decoded).
+    Returns decoded text body. If the email has only HTML (or text/plain
+    that is actually mislabeled HTML), the content is converted to markdown
+    preserving bold/italic formatting and links.
     This is the preferred endpoint for downstream text processing.
     """
     with _lock:
