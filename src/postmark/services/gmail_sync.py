@@ -90,11 +90,11 @@ class GmailSync:
         self._thread_local = threading.local()
 
         # Initialize clients
-        self._init_gmail()
+        self._init_gmail_creds()
         self._init_pubsub()
         self._init_postgres()
 
-    def _init_gmail(self) -> None:
+    def _init_gmail_creds(self) -> None:
         """Initialize Gmail credentials (client created per-thread for safety)."""
         with open(self.config.gmail_token_path) as f:
             token_data = json.load(f)
@@ -119,7 +119,7 @@ class GmailSync:
         """
         if not hasattr(self._thread_local, "gmail"):
             self._thread_local.gmail = build(
-                "gmail", "v1", credentials=self._gmail_creds
+                "gmail", "v1", credentials=self._gmail_creds, cache_discovery=False
             )
         return self._thread_local.gmail
 
