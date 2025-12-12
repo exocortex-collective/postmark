@@ -22,6 +22,15 @@ DUCKDB_PATH = os.environ.get("DUCKDB_PATH", "/app/data/emails.duckdb")
 HOST = os.environ.get("DUCKDB_API_HOST", "0.0.0.0")
 PORT = int(os.environ.get("DUCKDB_API_PORT", "8081"))
 
+# Pre-compiled regexes for _strip_html performance
+_SCRIPT_RE = re.compile(r"<script[^>]*>.*?</script>", re.DOTALL | re.IGNORECASE)
+_STYLE_RE = re.compile(r"<style[^>]*>.*?</style>", re.DOTALL | re.IGNORECASE)
+_BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+_P_RE = re.compile(r"</p>", re.IGNORECASE)
+_TAG_RE = re.compile(r"<[^>]+>")
+_WHITESPACE_RE = re.compile(r"[ \t]+")
+_NEWLINE_RE = re.compile(r"\n\s*\n+")
+
 
 def _decode_base64_urlsafe(data: str) -> str:
     """Decode base64 URL-safe encoded data (Gmail API format)."""
@@ -37,20 +46,18 @@ def _decode_base64_urlsafe(data: str) -> str:
 def _strip_html(html_content: str) -> str:
     """Strip HTML tags and decode entities to get plain text."""
     # Remove script and style elements
-    text = re.sub(
-        r"<script[^>]*>.*?</script>", "", html_content, flags=re.DOTALL | re.IGNORECASE
-    )
-    text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = _SCRIPT_RE.sub("", html_content)
+    text = _STYLE_RE.sub("", text)
     # Replace br and p tags with newlines
-    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
-    text = re.sub(r"</p>", "\n", text, flags=re.IGNORECASE)
+    text = _BR_RE.sub("\n", text)
+    text = _P_RE.sub("\n", text)
     # Remove all other HTML tags
-    text = re.sub(r"<[^>]+>", "", text)
+    text = _TAG_RE.sub("", text)
     # Decode HTML entities
     text = html.unescape(text)
     # Collapse multiple whitespace
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n\s*\n+", "\n\n", text)
+    text = _WHITESPACE_RE.sub(" ", text)
+    text = _NEWLINE_RE.sub("\n\n", text)
     return text.strip()
 
 
