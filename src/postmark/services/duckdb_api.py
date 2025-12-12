@@ -7,6 +7,7 @@ since DuckDB doesn't support multiple concurrent connections.
 import base64
 import json
 import os
+import re
 import threading
 from contextlib import asynccontextmanager
 from typing import Any
@@ -21,12 +22,13 @@ DUCKDB_PATH = os.environ.get("DUCKDB_PATH", "/app/data/emails.duckdb")
 HOST = os.environ.get("DUCKDB_API_HOST", "0.0.0.0")
 PORT = int(os.environ.get("DUCKDB_API_PORT", "8081"))
 
-# Configure html2text for clean plain text output
+# Configure html2text for clean markdown output
 _html2text = html2text.HTML2Text()
-_html2text.ignore_links = False  # Keep link URLs inline
-_html2text.ignore_images = True
-_html2text.ignore_emphasis = True  # Don't add * for bold/italic
+_html2text.ignore_links = False  # Keep link URLs as markdown [text](url)
+_html2text.ignore_images = True  # Skip image references
+_html2text.ignore_emphasis = False  # Keep **bold** and *italic* markdown
 _html2text.body_width = 0  # Don't wrap lines
+_html2text.single_line_break = True  # More compact output
 
 
 def _decode_base64_urlsafe(data: str) -> str:
@@ -40,17 +42,55 @@ def _decode_base64_urlsafe(data: str) -> str:
         return ""
 
 
-def _html_to_text(html_content: str) -> str:
-    """Convert HTML to plain text using html2text."""
+def _html_to_markdown(html_content: str) -> str:
+    """Convert HTML to markdown using html2text."""
     result: str = _html2text.handle(html_content)
     return result.strip()
+
+
+def _looks_like_html(text: str) -> bool:
+    """Check if text appears to contain significant HTML markup.
+
+    Some email senders incorrectly label HTML content as text/plain.
+    This detects that case so we can run the content through html2text.
+    """
+    if not text or len(text) < 50:
+        return False
+
+    # Count HTML-like tags
+    tags = re.findall(r"<[a-zA-Z][^>]*>", text[:2000])  # Check first 2KB
+    if len(tags) < 3:
+        return False
+
+    # Check for common HTML patterns
+    html_indicators = [
+        "<!DOCTYPE",
+        "<html",
+        "<body",
+        "<div",
+        "<span",
+        "<table",
+        "<p>",
+        "<br",
+        'class="',
+        'style="',
+    ]
+    indicator_count = sum(
+        1 for ind in html_indicators if ind.lower() in text[:2000].lower()
+    )
+
+    # If we have 3+ tags AND 2+ HTML indicators, it's probably HTML
+    return len(tags) >= 3 and indicator_count >= 2
 
 
 def _extract_body_text(parts: Any) -> str | None:
     """Extract plain text body from Gmail message parts.
 
-    Looks for text/plain first, falls back to text/html (stripped).
+    Looks for text/plain first, falls back to text/html (converted to markdown).
     Handles nested multipart messages using iterative DFS.
+
+    Some email senders incorrectly label HTML content as text/plain.
+    We detect this and convert it properly using html2text.
     """
     if not parts:
         return None
@@ -78,7 +118,7 @@ def _extract_body_text(parts: Any) -> str | None:
             body_data = part.get("body", {}).get("data")
             if body_data:
                 plain_body_data = body_data
-                break  # Found plain text, preferred format - stop search
+                # Don't break - also collect HTML in case plain is mislabeled
 
         elif mime_type == "text/html" and not html_body_data:
             # Store first HTML part as fallback
@@ -87,11 +127,15 @@ def _extract_body_text(parts: Any) -> str | None:
                 html_body_data = body_data
 
     if plain_body_data:
-        return _decode_base64_urlsafe(plain_body_data)
+        plain_text = _decode_base64_urlsafe(plain_body_data)
+        # Check if "plain" text is actually mislabeled HTML
+        if _looks_like_html(plain_text):
+            return _html_to_markdown(plain_text)
+        return plain_text
 
     if html_body_data:
         html_content = _decode_base64_urlsafe(html_body_data)
-        return _html_to_text(html_content)
+        return _html_to_markdown(html_content)
 
     return None
 
