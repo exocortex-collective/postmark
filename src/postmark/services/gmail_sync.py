@@ -112,14 +112,7 @@ class GmailSync:
         so a new one is created for each thread.
         """
         if not hasattr(self._thread_local, "gmail"):
-            creds = Credentials(
-                token=self._gmail_token_data["token"],
-                refresh_token=self._gmail_token_data["refresh_token"],
-                token_uri=self._gmail_token_data["token_uri"],
-                client_id=self._gmail_token_data["client_id"],
-                client_secret=self._gmail_token_data["client_secret"],
-                scopes=self._gmail_token_data["scopes"],
-            )
+            creds = Credentials(**self._gmail_token_data)
             self._thread_local.gmail = build(
                 "gmail", "v1", credentials=creds, cache_discovery=False
             )
