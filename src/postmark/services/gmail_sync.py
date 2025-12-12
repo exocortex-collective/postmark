@@ -86,6 +86,9 @@ class GmailSync:
         self._label_cache_lock = threading.Lock()
         self._label_sync_lock = threading.Lock()  # Prevents thundering herd on sync
 
+        # Thread-local storage for Gmail clients (httplib2 is not thread-safe)
+        self._thread_local = threading.local()
+
         # Initialize clients
         self._init_gmail()
         self._init_pubsub()
@@ -114,10 +117,6 @@ class GmailSync:
         requests on the same client corrupt SSL state. Each thread gets its
         own client instance via thread-local storage.
         """
-        if not hasattr(self, "_thread_local"):
-            # Lazy initialization of thread-local storage per instance
-            self._thread_local = threading.local()
-
         if not hasattr(self._thread_local, "gmail"):
             self._thread_local.gmail = build(
                 "gmail", "v1", credentials=self._gmail_creds
