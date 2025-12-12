@@ -6,6 +6,7 @@ since DuckDB doesn't support multiple concurrent connections.
 
 import base64
 import json
+import logging
 import os
 import re
 import threading
@@ -17,6 +18,8 @@ import html2text
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 DUCKDB_PATH = os.environ.get("DUCKDB_PATH", "/app/data/emails.duckdb")
 HOST = os.environ.get("DUCKDB_API_HOST", "0.0.0.0")
@@ -146,7 +149,9 @@ def _extract_body_text(parts: Any) -> str | None:
             try:
                 return _html_to_markdown(plain_text)
             except Exception:
-                # If html2text fails on malformed HTML, return the raw text
+                logger.warning(
+                    "html2text failed on mislabeled HTML, returning raw text"
+                )
                 return plain_text
         return plain_text
 
@@ -155,7 +160,7 @@ def _extract_body_text(parts: Any) -> str | None:
         try:
             return _html_to_markdown(html_content)
         except Exception:
-            # If html2text fails, return empty rather than raw HTML
+            logger.warning("html2text failed on HTML content, returning None")
             return None
 
     return None
