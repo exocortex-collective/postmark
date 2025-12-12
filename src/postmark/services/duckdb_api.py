@@ -30,7 +30,7 @@ def _decode_base64_urlsafe(data: str) -> str:
     padded = data + "=" * (4 - len(data) % 4) if len(data) % 4 else data
     try:
         return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
-    except Exception:
+    except (ValueError, UnicodeDecodeError):
         return ""
 
 
@@ -58,56 +58,48 @@ def _extract_body_text(parts: Any) -> str | None:
     """Extract plain text body from Gmail message parts.
 
     Looks for text/plain first, falls back to text/html (stripped).
-    Handles nested multipart messages.
+    Handles nested multipart messages using iterative DFS.
     """
     if not parts:
         return None
 
-    # If parts is a list, search through parts
+    plain_body_data = None
+    html_body_data = None
+
+    # Use a stack for iterative DFS traversal
+    stack: list[Any] = []
     if isinstance(parts, list):
-        # First pass: look for text/plain
-        for part in parts:
-            mime_type = part.get("mimeType", "")
-            if mime_type == "text/plain":
-                body_data = part.get("body", {}).get("data")
-                if body_data:
-                    return _decode_base64_urlsafe(body_data)
-            # Recurse into multipart
-            nested_parts = part.get("parts")
-            if nested_parts:
-                result = _extract_body_text(nested_parts)
-                if result:
-                    return result
-
-        # Second pass: fall back to text/html
-        for part in parts:
-            mime_type = part.get("mimeType", "")
-            if mime_type == "text/html":
-                body_data = part.get("body", {}).get("data")
-                if body_data:
-                    html_content = _decode_base64_urlsafe(body_data)
-                    return _strip_html(html_content)
-            # Recurse into multipart for html
-            nested_parts = part.get("parts")
-            if nested_parts:
-                result = _extract_body_text(nested_parts)
-                if result:
-                    return result
-
-    # If parts is a dict (single part), check directly
+        stack.extend(reversed(parts))
     elif isinstance(parts, dict):
-        mime_type = parts.get("mimeType", "")
-        body_data = parts.get("body", {}).get("data")
-        if body_data:
-            if mime_type == "text/plain":
-                return _decode_base64_urlsafe(body_data)
-            elif mime_type == "text/html":
-                html_content = _decode_base64_urlsafe(body_data)
-                return _strip_html(html_content)
-        # Check nested parts
-        nested_parts = parts.get("parts")
+        stack.append(parts)
+
+    while stack:
+        part = stack.pop()
+
+        # Add nested parts to stack for DFS
+        nested_parts = part.get("parts")
         if nested_parts:
-            return _extract_body_text(nested_parts)
+            stack.extend(reversed(nested_parts))
+
+        mime_type = part.get("mimeType", "")
+        if mime_type == "text/plain":
+            body_data = part.get("body", {}).get("data")
+            if body_data:
+                plain_body_data = body_data
+                break  # Found plain text, preferred format - stop search
+
+        elif mime_type == "text/html" and not html_body_data:
+            # Store first HTML part as fallback
+            body_data = part.get("body", {}).get("data")
+            if body_data:
+                html_body_data = body_data
+
+    if plain_body_data:
+        return _decode_base64_urlsafe(plain_body_data)
+
+    if html_body_data:
+        html_content = _decode_base64_urlsafe(html_body_data)
+        return _strip_html(html_content)
 
     return None
 
