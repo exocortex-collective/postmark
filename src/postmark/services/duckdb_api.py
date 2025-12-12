@@ -26,7 +26,8 @@ PORT = int(os.environ.get("DUCKDB_API_PORT", "8081"))
 _SCRIPT_RE = re.compile(r"<script[^>]*>.*?</script>", re.DOTALL | re.IGNORECASE)
 _STYLE_RE = re.compile(r"<style[^>]*>.*?</style>", re.DOTALL | re.IGNORECASE)
 _BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
-_P_RE = re.compile(r"</p>", re.IGNORECASE)
+# Block-level closing tags that should add newlines
+_BLOCK_CLOSE_RE = re.compile(r"</(?:p|div|h[1-6]|li|tr|blockquote|pre)>", re.IGNORECASE)
 _TAG_RE = re.compile(r"<[^>]+>")
 _WHITESPACE_RE = re.compile(r"[ \t]+")
 _NEWLINE_RE = re.compile(r"\n\s*\n+")
@@ -48,9 +49,10 @@ def _strip_html(html_content: str) -> str:
     # Remove script and style elements
     text = _SCRIPT_RE.sub("", html_content)
     text = _STYLE_RE.sub("", text)
-    # Replace br and p tags with newlines
+    # Replace br tags with newlines
     text = _BR_RE.sub("\n", text)
-    text = _P_RE.sub("\n", text)
+    # Replace block-level closing tags with newlines
+    text = _BLOCK_CLOSE_RE.sub("\n", text)
     # Remove all other HTML tags
     text = _TAG_RE.sub("", text)
     # Decode HTML entities
@@ -175,8 +177,16 @@ class StatsResponse(BaseModel):
     count: int
 
 
+class BodyDetails(BaseModel):
+    """Details for a single email body in batch responses."""
+
+    parts: Any = None
+    body_data: str | None = None
+    body_text: str | None = None
+
+
 class BodiesResponse(BaseModel):
-    bodies: dict[str, dict[str, Any]]
+    bodies: dict[str, BodyDetails]
 
 
 class GmailIdsResponse(BaseModel):
@@ -303,14 +313,14 @@ def get_bodies(
         ).fetchall()
 
     # Deserialize JSON parts and extract body text
-    bodies = {}
+    bodies: dict[str, BodyDetails] = {}
     for row in rows:
         parts_data = json.loads(row[1]) if row[1] else None
-        bodies[row[0]] = {
-            "parts": parts_data,
-            "body_data": row[2],
-            "body_text": _extract_body_text(parts_data),
-        }
+        bodies[row[0]] = BodyDetails(
+            parts=parts_data,
+            body_data=row[2],
+            body_text=_extract_body_text(parts_data),
+        )
     return BodiesResponse(bodies=bodies)
 
 
