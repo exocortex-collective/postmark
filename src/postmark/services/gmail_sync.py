@@ -468,7 +468,7 @@ class GmailSync:
                 execute_values(
                     cur,
                     """
-                    INSERT INTO gmail_labels (id, name, name_parts, type, updated_at)
+                    INSERT INTO gmail_labels (id, name, name_parts, type)
                     VALUES %s
                     ON CONFLICT (id) DO UPDATE SET
                         name = EXCLUDED.name,
