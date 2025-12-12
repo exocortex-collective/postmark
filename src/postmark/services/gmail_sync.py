@@ -372,13 +372,20 @@ class GmailSync:
         if already_exists:
             label_ids = msg.get("labelIds", [])
             with self._get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE emails_raw SET label_ids = %s WHERE gmail_id = %s",
-                        (label_ids, gmail_id),
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE emails_raw SET label_ids = %s WHERE gmail_id = %s",
+                            (label_ids, gmail_id),
+                        )
+                    conn.commit()
+                    logger.debug(f"Message {gmail_id} exists, updated labels")
+                except Exception as e:
+                    conn.rollback()
+                    logger.error(
+                        f"Failed to update labels for {gmail_id}, rolled back: {e}"
                     )
-                conn.commit()
-            logger.debug(f"Message {gmail_id} exists, updated labels")
+                    raise
             return
 
         payload = msg.get("payload", {})
