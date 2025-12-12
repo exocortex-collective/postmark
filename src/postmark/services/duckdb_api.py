@@ -59,7 +59,7 @@ def _looks_like_html(text: str) -> bool:
 
     Uses conservative thresholds to avoid false positives:
     - Minimum 50 chars (very short text can't be meaningful HTML)
-    - Check first 2KB only (enough to detect structure, avoids scanning huge emails)
+    - Check first 8KB (some emails have long tracking URLs before HTML content)
     - Require 3+ HTML tags (avoids false positives like "value < 10" or XML snippets)
     - Require 2+ HTML-specific indicators (distinguishes from generic angle brackets)
     """
@@ -67,8 +67,10 @@ def _looks_like_html(text: str) -> bool:
     if not text or len(text) < 50:
         return False
 
+    # Sample first 8KB - some emails have long tracking URLs before HTML content
+    sample = text[:8000]
+
     # Fast path: if no angle brackets, definitely not HTML
-    sample = text[:2000]
     if "<" not in sample:
         return False
 
