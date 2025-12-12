@@ -23,6 +23,9 @@ from googleapiclient.errors import HttpError
 from psycopg2.extras import execute_values
 from psycopg2.pool import ThreadedConnectionPool
 
+# Thread-local storage for Gmail clients (httplib2 is not thread-safe)
+_thread_local = threading.local()
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -92,11 +95,11 @@ class GmailSync:
         self._init_postgres()
 
     def _init_gmail(self) -> None:
-        """Initialize Gmail API client."""
+        """Initialize Gmail credentials (client created per-thread for safety)."""
         with open(self.config.gmail_token_path) as f:
             token_data = json.load(f)
 
-        creds = Credentials(
+        self._gmail_creds = Credentials(
             token=token_data["token"],
             refresh_token=token_data["refresh_token"],
             token_uri=token_data["token_uri"],
@@ -104,8 +107,19 @@ class GmailSync:
             client_secret=token_data["client_secret"],
             scopes=token_data["scopes"],
         )
-        self.gmail = build("gmail", "v1", credentials=creds)
         logger.info("Gmail client initialized")
+
+    @property
+    def gmail(self) -> Any:
+        """Get thread-local Gmail API client.
+
+        httplib2 (used by googleapiclient) is not thread-safe - concurrent
+        requests on the same client corrupt SSL state. Each thread gets its
+        own client instance via thread-local storage.
+        """
+        if not hasattr(_thread_local, "gmail"):
+            _thread_local.gmail = build("gmail", "v1", credentials=self._gmail_creds)
+        return _thread_local.gmail
 
     def _init_pubsub(self) -> None:
         """Initialize Pub/Sub subscriber."""
