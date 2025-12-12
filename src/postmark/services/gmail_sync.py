@@ -354,18 +354,32 @@ class GmailSync:
         Network calls (Gmail API, DuckDB API) happen before the transaction.
         All DB operations for a single message are in one transaction.
         Either everything succeeds or everything rolls back.
-        """
-        if self._email_exists(gmail_id):
-            logger.debug(f"Message {gmail_id} already exists, skipping")
-            return
 
-        # Fetch from Gmail API (outside transaction)
+        If message already exists, we still update label_ids from Gmail
+        (to capture any label changes) but skip body/attachments/parse enqueue.
+        """
+        already_exists = self._email_exists(gmail_id)
+
+        # Fetch from Gmail API (outside transaction) - always fetch to get current labels
         msg = (
             self.gmail.users()
             .messages()
             .get(userId="me", id=gmail_id, format="full")
             .execute()
         )
+
+        # If already exists, just update labels and return
+        if already_exists:
+            label_ids = msg.get("labelIds", [])
+            with self._get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE emails_raw SET label_ids = %s WHERE gmail_id = %s",
+                        (label_ids, gmail_id),
+                    )
+                conn.commit()
+            logger.debug(f"Message {gmail_id} exists, updated labels")
+            return
 
         payload = msg.get("payload", {})
         attachment_ids = self._extract_attachment_ids(payload)
