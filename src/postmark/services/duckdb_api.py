@@ -5,15 +5,14 @@ since DuckDB doesn't support multiple concurrent connections.
 """
 
 import base64
-import html
 import json
 import os
-import re
 import threading
 from contextlib import asynccontextmanager
 from typing import Any
 
 import duckdb
+import html2text
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
@@ -22,15 +21,12 @@ DUCKDB_PATH = os.environ.get("DUCKDB_PATH", "/app/data/emails.duckdb")
 HOST = os.environ.get("DUCKDB_API_HOST", "0.0.0.0")
 PORT = int(os.environ.get("DUCKDB_API_PORT", "8081"))
 
-# Pre-compiled regexes for _strip_html performance
-_SCRIPT_RE = re.compile(r"<script[^>]*>.*?</script>", re.DOTALL | re.IGNORECASE)
-_STYLE_RE = re.compile(r"<style[^>]*>.*?</style>", re.DOTALL | re.IGNORECASE)
-_BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
-# Block-level closing tags that should add newlines
-_BLOCK_CLOSE_RE = re.compile(r"</(?:p|div|h[1-6]|li|tr|blockquote|pre)>", re.IGNORECASE)
-_TAG_RE = re.compile(r"<[^>]+>")
-_WHITESPACE_RE = re.compile(r"[ \t]+")
-_NEWLINE_RE = re.compile(r"\n\s*\n+")
+# Configure html2text for clean plain text output
+_html2text = html2text.HTML2Text()
+_html2text.ignore_links = False  # Keep link URLs inline
+_html2text.ignore_images = True
+_html2text.ignore_emphasis = True  # Don't add * for bold/italic
+_html2text.body_width = 0  # Don't wrap lines
 
 
 def _decode_base64_urlsafe(data: str) -> str:
@@ -44,23 +40,10 @@ def _decode_base64_urlsafe(data: str) -> str:
         return ""
 
 
-def _strip_html(html_content: str) -> str:
-    """Strip HTML tags and decode entities to get plain text."""
-    # Remove script and style elements
-    text = _SCRIPT_RE.sub("", html_content)
-    text = _STYLE_RE.sub("", text)
-    # Replace br tags with newlines
-    text = _BR_RE.sub("\n", text)
-    # Replace block-level closing tags with newlines
-    text = _BLOCK_CLOSE_RE.sub("\n", text)
-    # Remove all other HTML tags
-    text = _TAG_RE.sub("", text)
-    # Decode HTML entities
-    text = html.unescape(text)
-    # Collapse multiple whitespace
-    text = _WHITESPACE_RE.sub(" ", text)
-    text = _NEWLINE_RE.sub("\n\n", text)
-    return text.strip()
+def _html_to_text(html_content: str) -> str:
+    """Convert HTML to plain text using html2text."""
+    result: str = _html2text.handle(html_content)
+    return result.strip()
 
 
 def _extract_body_text(parts: Any) -> str | None:
@@ -108,7 +91,7 @@ def _extract_body_text(parts: Any) -> str | None:
 
     if html_body_data:
         html_content = _decode_base64_urlsafe(html_body_data)
-        return _strip_html(html_content)
+        return _html_to_text(html_content)
 
     return None
 
