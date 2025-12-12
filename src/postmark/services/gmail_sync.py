@@ -16,6 +16,7 @@ from typing import Any
 import psycopg2
 import schedule
 from google.cloud import pubsub_v1
+from google.cloud.pubsub_v1.types import FlowControl
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -939,9 +940,13 @@ class GmailSync:
         scheduler_thread = threading.Thread(target=self.run_scheduler, daemon=True)
         scheduler_thread.start()
 
-        # Start Pub/Sub subscriber (blocks)
+        # Start Pub/Sub subscriber with flow control to prevent connection pool exhaustion
+        # Limit concurrent messages to match pool size
+        flow_control = FlowControl(max_messages=self.config.postgres.pool_max_conn)
         streaming_pull_future = self.subscriber.subscribe(
-            self.config.subscription_path, callback=self.process_notification
+            self.config.subscription_path,
+            callback=self.process_notification,
+            flow_control=flow_control,
         )
         logger.info(f"Listening on {self.config.subscription_path}")
 
