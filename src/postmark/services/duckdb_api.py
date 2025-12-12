@@ -53,16 +53,28 @@ def _looks_like_html(text: str) -> bool:
 
     Some email senders incorrectly label HTML content as text/plain.
     This detects that case so we can run the content through html2text.
+
+    Uses conservative thresholds to avoid false positives:
+    - Minimum 50 chars (very short text can't be meaningful HTML)
+    - Check first 2KB only (enough to detect structure, avoids scanning huge emails)
+    - Require 3+ HTML tags (avoids false positives like "value < 10" or XML snippets)
+    - Require 2+ HTML-specific indicators (distinguishes from generic angle brackets)
     """
+    # Minimum length check - very short text can't be meaningful HTML
     if not text or len(text) < 50:
         return False
 
-    # Count HTML-like tags
-    tags = re.findall(r"<[a-zA-Z][^>]*>", text[:2000])  # Check first 2KB
+    # Fast path: if no angle brackets, definitely not HTML
+    sample = text[:2000]
+    if "<" not in sample:
+        return False
+
+    # Count HTML-like tags (require 3+ to avoid false positives)
+    tags = re.findall(r"<[a-zA-Z][^>]*>", sample)
     if len(tags) < 3:
         return False
 
-    # Check for common HTML patterns
+    # Check for HTML-specific patterns (require 2+ indicators)
     html_indicators = [
         "<!DOCTYPE",
         "<html",
@@ -75,22 +87,23 @@ def _looks_like_html(text: str) -> bool:
         'class="',
         'style="',
     ]
-    indicator_count = sum(
-        1 for ind in html_indicators if ind.lower() in text[:2000].lower()
-    )
+    sample_lower = sample.lower()
+    indicator_count = sum(1 for ind in html_indicators if ind.lower() in sample_lower)
 
-    # If we have 3+ tags AND 2+ HTML indicators, it's probably HTML
+    # Both conditions must be met to classify as HTML
     return len(tags) >= 3 and indicator_count >= 2
 
 
 def _extract_body_text(parts: Any) -> str | None:
-    """Extract plain text body from Gmail message parts.
+    """Extract text body from Gmail message parts (markdown format).
 
     Looks for text/plain first, falls back to text/html (converted to markdown).
     Handles nested multipart messages using iterative DFS.
 
     Some email senders incorrectly label HTML content as text/plain.
     We detect this and convert it properly using html2text.
+
+    Returns markdown-formatted text (preserving bold/italic/links).
     """
     if not parts:
         return None
@@ -116,12 +129,12 @@ def _extract_body_text(parts: Any) -> str | None:
         mime_type = part.get("mimeType", "")
         if mime_type == "text/plain":
             body_data = part.get("body", {}).get("data")
-            if body_data:
+            # Use first text/plain part found (don't overwrite with later parts)
+            if body_data and not plain_body_data:
                 plain_body_data = body_data
-                # Don't break - also collect HTML in case plain is mislabeled
 
         elif mime_type == "text/html" and not html_body_data:
-            # Store first HTML part as fallback
+            # Store first HTML part as fallback if no plain text
             body_data = part.get("body", {}).get("data")
             if body_data:
                 html_body_data = body_data
@@ -130,12 +143,20 @@ def _extract_body_text(parts: Any) -> str | None:
         plain_text = _decode_base64_urlsafe(plain_body_data)
         # Check if "plain" text is actually mislabeled HTML
         if _looks_like_html(plain_text):
-            return _html_to_markdown(plain_text)
+            try:
+                return _html_to_markdown(plain_text)
+            except Exception:
+                # If html2text fails on malformed HTML, return the raw text
+                return plain_text
         return plain_text
 
     if html_body_data:
         html_content = _decode_base64_urlsafe(html_body_data)
-        return _html_to_markdown(html_content)
+        try:
+            return _html_to_markdown(html_content)
+        except Exception:
+            # If html2text fails, return empty rather than raw HTML
+            return None
 
     return None
 
@@ -297,10 +318,11 @@ def get_body(
 def get_mail_text(
     gmail_id: str = Query(..., description="Gmail message ID")
 ) -> MailTextResponse:
-    """Get plain text content of an email.
+    """Get text content of an email (markdown format).
 
-    Returns decoded plain text body. If the email has only HTML, the HTML
-    is rendered to plain text (tags stripped, entities decoded).
+    Returns decoded text body. If the email has only HTML (or text/plain
+    that is actually mislabeled HTML), the content is converted to markdown
+    preserving bold/italic formatting and links.
     This is the preferred endpoint for downstream text processing.
     """
     with _lock:
