@@ -18,13 +18,10 @@ import schedule
 from google.cloud import pubsub_v1
 from google.cloud.pubsub_v1.types import FlowControl
 from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
+from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 from psycopg2.extras import execute_values
 from psycopg2.pool import ThreadedConnectionPool
-
-# Thread-local storage for Gmail clients (httplib2 is not thread-safe)
-_thread_local = threading.local()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -110,16 +107,22 @@ class GmailSync:
         logger.info("Gmail client initialized")
 
     @property
-    def gmail(self) -> Any:
+    def gmail(self) -> Resource:
         """Get thread-local Gmail API client.
 
         httplib2 (used by googleapiclient) is not thread-safe - concurrent
         requests on the same client corrupt SSL state. Each thread gets its
         own client instance via thread-local storage.
         """
-        if not hasattr(_thread_local, "gmail"):
-            _thread_local.gmail = build("gmail", "v1", credentials=self._gmail_creds)
-        return _thread_local.gmail
+        if not hasattr(self, "_thread_local"):
+            # Lazy initialization of thread-local storage per instance
+            self._thread_local = threading.local()
+
+        if not hasattr(self._thread_local, "gmail"):
+            self._thread_local.gmail = build(
+                "gmail", "v1", credentials=self._gmail_creds
+            )
+        return self._thread_local.gmail
 
     def _init_pubsub(self) -> None:
         """Initialize Pub/Sub subscriber."""
