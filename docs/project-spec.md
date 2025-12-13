@@ -96,7 +96,7 @@ postmark runs as 4 Docker containers:
 | gmail-sync | `cortex-postmark-gmail-sync` | Pub/Sub listener, Gmail API, stores raw emails |
 | duckdb-api | `cortex-postmark-duckdb-api` | REST API for DuckDB body queries |
 | parse-worker | `cortex-postmark-parse-worker` | Header parsing, emails_parsed |
-| attachment-worker | `cortex-postmark-attachment-worker` | Fetches attachments, stores in S3 |
+| attachment-worker | `cortex-postmark-attachment-worker` | Fetches attachments to S3, updates `attachments` table |
 
 The **duckdb-api** holds the write lock on DuckDB and exposes endpoints:
 - `GET /health` - Health check
