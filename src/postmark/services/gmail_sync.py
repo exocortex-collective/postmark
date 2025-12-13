@@ -366,7 +366,9 @@ class GmailSync:
                 )
                 raise
 
-    def store_raw_message(self, gmail_id: str) -> None:
+    def store_raw_message(
+        self, gmail_id: str, already_exists: bool | None = None
+    ) -> None:
         """Fetch and store raw message - no parsing, just slam it in.
 
         Network calls (Gmail API, DuckDB API) happen before the transaction.
@@ -377,8 +379,13 @@ class GmailSync:
         (to capture any label changes) but skip body/attachments/parse enqueue.
 
         If message was deleted (404), logs and returns without error.
+
+        Args:
+            gmail_id: The Gmail message ID.
+            already_exists: If provided, skips the internal existence check.
         """
-        already_exists = self._email_exists(gmail_id)
+        if already_exists is None:
+            already_exists = self._email_exists(gmail_id)
 
         # Fetch from Gmail API (outside transaction) - always fetch to get current labels
         try:
@@ -911,7 +918,7 @@ class GmailSync:
                 already_exists = self._email_exists(gmail_id)
 
                 try:
-                    self.store_raw_message(gmail_id)
+                    self.store_raw_message(gmail_id, already_exists=already_exists)
                     if already_exists:
                         updated += 1
                     else:
