@@ -57,7 +57,7 @@ This is intentional - it keeps the system simple and avoids the complexity of mu
          └───────┬──────────────────────────────────────────┘
                  │
         ┌────────┼────────┬──────────────┐
-        ▼        ▼        ▼              ▼
+        ▼        ▼        ▼
 ┌─────────────┐ ┌─────────────┐ ┌───────────────┐
 │  Postgres   │ │  DuckDB API │ │ Queue: parse  │
 │ emails_raw  │ │ (REST API)  │ │ Queue: attach │
