@@ -348,24 +348,63 @@ class GmailSync:
                 result[key] = value
         return result
 
-    def store_raw_message(self, gmail_id: str) -> None:
+    def _update_message_labels(self, gmail_id: str, label_ids: list[str]) -> None:
+        """Update label_ids for an existing email in the database."""
+        with self._get_conn() as conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE emails_raw SET label_ids = %s WHERE gmail_id = %s",
+                        (label_ids, gmail_id),
+                    )
+                conn.commit()
+                logger.debug(f"Message {gmail_id} exists, updated labels")
+            except psycopg2.Error as e:
+                conn.rollback()
+                logger.error(
+                    f"Failed to update labels for {gmail_id}, rolled back: {e}"
+                )
+                raise
+
+    def store_raw_message(
+        self, gmail_id: str, already_exists: bool | None = None
+    ) -> None:
         """Fetch and store raw message - no parsing, just slam it in.
 
         Network calls (Gmail API, DuckDB API) happen before the transaction.
         All DB operations for a single message are in one transaction.
         Either everything succeeds or everything rolls back.
-        """
-        if self._email_exists(gmail_id):
-            logger.debug(f"Message {gmail_id} already exists, skipping")
-            return
 
-        # Fetch from Gmail API (outside transaction)
-        msg = (
-            self.gmail.users()
-            .messages()
-            .get(userId="me", id=gmail_id, format="full")
-            .execute()
-        )
+        If message already exists, we still update label_ids from Gmail
+        (to capture any label changes) but skip body/attachments/parse enqueue.
+
+        If message was deleted (404), logs and returns without error.
+
+        Args:
+            gmail_id: The Gmail message ID.
+            already_exists: If provided, skips the internal existence check.
+        """
+        if already_exists is None:
+            already_exists = self._email_exists(gmail_id)
+
+        # Fetch from Gmail API (outside transaction) - always fetch to get current labels
+        try:
+            msg = (
+                self.gmail.users()
+                .messages()
+                .get(userId="me", id=gmail_id, format="full")
+                .execute()
+            )
+        except HttpError as e:
+            if e.resp.status == 404:
+                logger.info(f"Message {gmail_id} not found (deleted), skipping")
+                return
+            raise
+
+        # If already exists, just update labels and return
+        if already_exists:
+            self._update_message_labels(gmail_id, msg.get("labelIds", []))
+            return
 
         payload = msg.get("payload", {})
         attachment_ids = self._extract_attachment_ids(payload)
@@ -435,7 +474,7 @@ class GmailSync:
                 conn.commit()
                 logger.info(f"Stored message {gmail_id}")
 
-            except Exception as e:
+            except psycopg2.Error as e:
                 conn.rollback()
                 logger.error(f"Failed to store message {gmail_id}, rolled back: {e}")
                 raise
@@ -615,7 +654,7 @@ class GmailSync:
                 # Commit the label event transaction
                 conn.commit()
 
-            except Exception as e:
+            except psycopg2.Error as e:
                 conn.rollback()
                 logger.error(
                     f"Failed to process label event for {gmail_id}, rolled back: {e}"
@@ -660,7 +699,7 @@ class GmailSync:
                 else:
                     logger.debug(f"Message {gmail_id} not found for soft delete")
 
-            except Exception as e:
+            except psycopg2.Error as e:
                 conn.rollback()
                 logger.error(f"Failed to soft delete {gmail_id}: {e}")
                 raise
@@ -744,7 +783,13 @@ class GmailSync:
             self._set_last_history_id(email_address, new_id)
             message.ack()
 
-        except Exception as e:
+        except (
+            HttpError,
+            psycopg2.Error,
+            urllib.error.URLError,
+            TimeoutError,
+            RuntimeError,
+        ) as e:
             logger.exception(f"Error processing notification: {e}")
             message.nack()
 
@@ -809,7 +854,7 @@ class GmailSync:
                 f"Watch renewed for {email_address}, expires at {expiration_dt}"
             )
 
-        except Exception as e:
+        except (HttpError, psycopg2.Error) as e:
             logger.exception(f"Failed to renew watch: {e}")
 
     def backfill(
@@ -825,7 +870,7 @@ class GmailSync:
             after: Absolute date in YYYY-MM-DD format (e.g., "2025-01-01")
 
         Returns:
-            Tuple of (stored_count, skipped_count)
+            Tuple of (stored_count, updated_count) - new messages and label updates
         """
         if after:
             # Parse absolute date with validation
@@ -847,7 +892,7 @@ class GmailSync:
         query = f"after:{after_date}"
 
         stored = 0
-        skipped = 0
+        updated = 0
         newest_message_id: str | None = None
         page_token: str | None = None
 
@@ -876,25 +921,32 @@ class GmailSync:
             # Process this page (reverse to go oldest first within page)
             for msg in reversed(messages):
                 gmail_id = msg["id"]
-                if self._email_exists(gmail_id):
-                    skipped += 1
-                    continue
+                already_exists = self._email_exists(gmail_id)
 
                 try:
-                    self.store_raw_message(gmail_id)
-                    stored += 1
+                    self.store_raw_message(gmail_id, already_exists=already_exists)
+                    if already_exists:
+                        updated += 1
+                    else:
+                        stored += 1
 
-                    if (stored + skipped) % 100 == 0:
-                        logger.info(f"Progress: stored {stored}, skipped {skipped}")
+                    if (stored + updated) % 100 == 0:
+                        logger.info(f"Progress: stored {stored}, updated {updated}")
 
-                except Exception as e:
-                    logger.error(f"Failed to store {gmail_id}: {e}")
+                except (
+                    HttpError,
+                    psycopg2.Error,
+                    urllib.error.URLError,
+                    TimeoutError,
+                    RuntimeError,
+                ) as e:
+                    logger.error(f"Failed to process {gmail_id}: {e}")
 
             page_token = result.get("nextPageToken")
             if not page_token:
                 break
 
-        logger.info(f"Checked {stored + skipped} messages total")
+        logger.info(f"Processed {stored + updated} messages total")
 
         # Update history baseline if we stored new messages
         if newest_message_id and stored > 0:
@@ -920,8 +972,8 @@ class GmailSync:
                     self._set_last_history_id(email_address, newest_history_id)
                     logger.info(f"Updated history baseline to {newest_history_id}")
 
-        logger.info(f"Backfill complete: stored {stored}, skipped {skipped}")
-        return stored, skipped
+        logger.info(f"Backfill complete: stored {stored}, updated {updated}")
+        return stored, updated
 
     def fallback_poll(self) -> None:
         """Hourly fallback poll to catch missed notifications."""
