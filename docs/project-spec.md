@@ -100,12 +100,13 @@ postmark runs as 4 Docker containers:
 
 The **duckdb-api** holds the write lock on DuckDB and exposes endpoints:
 - `GET /health` - Health check
-- `GET /stats` - Email count, size
+- `GET /stats` - Email count
 - `GET /body?gmail_id=X` - Single body
+- `POST /body` - Store an email body
 - `GET /bodies?gmail_ids=X,Y,Z` - Batch body fetch
 - `GET /gmail_ids` - List all gmail IDs in DuckDB
 - `GET /mail_text?gmail_id=X` - Extract plain text from email
-- `GET /checkpoint` - Get current checkpoint for sync
+- `POST /checkpoint` - Force a WAL checkpoint
 
 ## Gmail Push Notification Flow
 
