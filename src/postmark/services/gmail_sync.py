@@ -348,6 +348,24 @@ class GmailSync:
                 result[key] = value
         return result
 
+    def _update_message_labels(self, gmail_id: str, label_ids: list[str]) -> None:
+        """Update label_ids for an existing email in the database."""
+        with self._get_conn() as conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE emails_raw SET label_ids = %s WHERE gmail_id = %s",
+                        (label_ids, gmail_id),
+                    )
+                conn.commit()
+                logger.debug(f"Message {gmail_id} exists, updated labels")
+            except psycopg2.Error as e:
+                conn.rollback()
+                logger.error(
+                    f"Failed to update labels for {gmail_id}, rolled back: {e}"
+                )
+                raise
+
     def store_raw_message(self, gmail_id: str) -> None:
         """Fetch and store raw message - no parsing, just slam it in.
 
@@ -378,22 +396,7 @@ class GmailSync:
 
         # If already exists, just update labels and return
         if already_exists:
-            label_ids = msg.get("labelIds", [])
-            with self._get_conn() as conn:
-                try:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "UPDATE emails_raw SET label_ids = %s WHERE gmail_id = %s",
-                            (label_ids, gmail_id),
-                        )
-                    conn.commit()
-                    logger.debug(f"Message {gmail_id} exists, updated labels")
-                except psycopg2.Error as e:
-                    conn.rollback()
-                    logger.error(
-                        f"Failed to update labels for {gmail_id}, rolled back: {e}"
-                    )
-                    raise
+            self._update_message_labels(gmail_id, msg.get("labelIds", []))
             return
 
         payload = msg.get("payload", {})
