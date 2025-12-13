@@ -28,7 +28,7 @@ This is intentional - it keeps the system simple and avoids the complexity of mu
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        Gmail API                             │
-│              (watch + history.list + messages.get)           │
+│        (watch + history.list + messages.get + labels)        │
 └────────────────┬────────────────────────────────────────────┘
                  │ Push notification (on mailbox change)
                  ▼
@@ -46,41 +46,61 @@ This is intentional - it keeps the system simple and avoids the complexity of mu
          └───────┬───────┘
                  │ Long-poll (sub-second latency)
                  ▼
-         ┌───────────────┐
-         │  gmail-sync   │  (Python daemon - simple, robust)
-         │  - Pulls subscription
-         │  - Calls history.list
-         │  - Stores RAW API response
-         │  - No parsing!
-         └───────┬───────┘
+         ┌───────────────────────────────────────────────────┐
+         │             gmail-sync (Python daemon)            │
+         │  - Pulls Pub/Sub subscription                     │
+         │  - Processes history: messageAdded, labelAdded,   │
+         │    labelRemoved, messageDeleted                   │
+         │  - Stores raw API response (no parsing)           │
+         │  - Syncs Gmail labels to gmail_labels table       │
+         │  - Renews watch daily, hourly fallback poll       │
+         └───────┬──────────────────────────────────────────┘
                  │
-        ┌────────┴────────┐
-        ▼                 ▼
-┌───────────────┐  ┌───────────────┐
-│   Postgres    │  │    DuckDB     │
-│  emails_raw   │  │  email_bodies │
-│  (envelope,   │  │  (parts,      │
-│   headers,    │  │   body_data)  │
-│   metadata)   │  │               │
-└───────┬───────┘  └───────────────┘
-        │
-        │ Queue: 'parse'
-        ▼
-┌───────────────┐
-│ parse-worker  │  (fail-fast, iterate on errors)
-│ - Reads raw headers
-│ - Extracts structured fields
-│ - Writes emails_parsed
-└───────┬───────┘
-        │
-        │ Queue: 'classify'
-        ▼
-┌───────────────┐
-│    triage     │  (separate service)
-│ - LLM classification
-│ - Gmail label routing
-└───────────────┘
+        ┌────────┼────────┬──────────────┐
+        ▼        ▼        ▼              ▼
+┌─────────────┐ ┌─────────────┐ ┌───────────────┐
+│  Postgres   │ │  DuckDB API │ │ Queue: parse  │
+│ emails_raw  │ │ email_bodies│ │ Queue: attach │
+│ gmail_labels│ │ (via REST)  │ │ Queue: triage │
+│ attachments │ └─────────────┘ └───────┬───────┘
+│ sync_state  │                         │
+└─────────────┘                         │
+                                        ▼
+         ┌──────────────────────────────────────────────────┐
+         │                Workers (parallel)                │
+         │  ┌──────────────┐  ┌───────────────────────────┐ │
+         │  │ parse-worker │  │ attachment-worker         │ │
+         │  │ Headers→     │  │ Gmail API→S3/Minio        │ │
+         │  │ emails_parsed│  │ Updates attachments table │ │
+         │  └──────────────┘  └───────────────────────────┘ │
+         └──────────────────────────────────────────────────┘
+                 │
+                 │ Queue: 'triage'
+                 ▼
+         ┌───────────────┐
+         │    triage     │  (separate service)
+         │ - Rules engine│
+         │ - LLM fallback│
+         │ - Gmail labels│
+         └───────────────┘
 ```
+
+## Services
+
+postmark runs as 4 Docker containers:
+
+| Service | Container | Purpose |
+|---------|-----------|---------|
+| gmail-sync | cortex-gmail-sync | Pub/Sub listener, Gmail API, stores raw emails |
+| duckdb-api | cortex-duckdb-api | REST API for DuckDB body queries |
+| parse-worker | cortex-parse-worker | Header parsing, emails_parsed |
+| attachment-worker | cortex-attachment-worker | Fetches attachments, stores in S3 |
+
+The **duckdb-api** holds the write lock on DuckDB and exposes endpoints:
+- `GET /health` - Health check
+- `GET /stats` - Email count, size
+- `GET /body?gmail_id=X` - Single body
+- `POST /bodies` - Batch body fetch
 
 ## Gmail Push Notification Flow
 
@@ -116,26 +136,55 @@ This allows reprocessing without refetching from Gmail API.
 ### Postgres Tables
 
 ```sql
--- Raw email storage (written by gmail-sync, never fails)
+-- Raw email storage (written by gmail-sync)
 CREATE TABLE emails_raw (
     id BIGSERIAL PRIMARY KEY,
     gmail_id TEXT UNIQUE NOT NULL,
     thread_id TEXT NOT NULL,
     history_id TEXT NOT NULL,
-    label_ids TEXT[],
+    label_ids TEXT[],               -- Gmail label IDs (updated on label events)
     internal_date BIGINT NOT NULL,  -- ms since epoch from Gmail
     size_estimate INT,
     snippet TEXT,
-    headers JSONB NOT NULL,  -- Raw headers array from API
+    headers JSONB NOT NULL,         -- Raw headers array from API
     mime_type TEXT,
-    attachment_ids TEXT[],  -- For separate attachment fetch queue
-    raw_response JSONB,  -- Full API response minus body (for debugging)
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    attachment_ids TEXT[],          -- For separate attachment fetch queue
+    raw_response JSONB,             -- Full API response minus body
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ          -- Soft delete (set when Gmail message deleted)
 );
 
 CREATE INDEX idx_emails_raw_gmail_id ON emails_raw(gmail_id);
 CREATE INDEX idx_emails_raw_thread ON emails_raw(thread_id);
 CREATE INDEX idx_emails_raw_date ON emails_raw(internal_date DESC);
+
+-- Gmail label mapping (synced from Gmail API)
+CREATE TABLE gmail_labels (
+    id TEXT PRIMARY KEY,            -- Gmail label ID (e.g., "Label_123")
+    name TEXT NOT NULL,             -- Full label name (e.g., "Cortex/Uncategorized")
+    name_parts TEXT[] NOT NULL,     -- Path parts for hierarchy queries
+    type TEXT,                       -- 'system' or 'user'
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_gmail_labels_name ON gmail_labels(name);
+CREATE INDEX idx_gmail_labels_parts ON gmail_labels USING GIN(name_parts);
+
+-- Attachment metadata (written by attachment-worker)
+CREATE TABLE attachments (
+    id BIGSERIAL PRIMARY KEY,
+    gmail_id TEXT NOT NULL,
+    attachment_id TEXT NOT NULL,
+    filename TEXT,
+    mime_type TEXT,
+    size_bytes INT,
+    s3_bucket TEXT NOT NULL,        -- S3/Minio bucket
+    s3_key TEXT NOT NULL,           -- S3/Minio object key
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(gmail_id, attachment_id)
+);
+
+CREATE INDEX idx_attachments_gmail_id ON attachments(gmail_id);
 
 -- Parsed email metadata (written by parse-worker)
 CREATE TABLE emails_parsed (
@@ -147,10 +196,10 @@ CREATE TABLE emails_parsed (
     cc_addrs TEXT[],
     bcc_addrs TEXT[],
     subject TEXT,
-    date_header TIMESTAMPTZ,  -- Parsed from Date header
-    message_id TEXT,  -- Message-ID header
-    in_reply_to TEXT,  -- In-Reply-To header
-    references TEXT[],  -- References header (for threading fallback)
+    date_header TIMESTAMPTZ,        -- Parsed from Date header
+    message_id TEXT,                -- Message-ID header
+    in_reply_to TEXT,               -- In-Reply-To header
+    references TEXT[],              -- References header (for threading)
     parsed_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -171,7 +220,7 @@ CREATE TABLE sync_state (
 -- Generic queue for downstream processing
 CREATE TABLE queue (
     id BIGSERIAL PRIMARY KEY,
-    queue_name TEXT NOT NULL,  -- 'parse', 'classify', 'attachment', 'route'
+    queue_name TEXT NOT NULL,       -- 'parse', 'triage', 'attachment'
     payload JSONB NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     attempts INT DEFAULT 0,
@@ -185,6 +234,8 @@ CREATE TABLE queue (
 );
 
 CREATE INDEX idx_queue_pending ON queue(queue_name, status, created_at)
+    WHERE status = 'pending';
+CREATE INDEX idx_queue_pending_gmail_id ON queue((payload->>'gmail_id'))
     WHERE status = 'pending';
 ```
 
