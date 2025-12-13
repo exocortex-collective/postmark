@@ -783,7 +783,13 @@ class GmailSync:
             self._set_last_history_id(email_address, new_id)
             message.ack()
 
-        except (HttpError, psycopg2.Error) as e:
+        except (
+            HttpError,
+            psycopg2.Error,
+            urllib.error.URLError,
+            TimeoutError,
+            RuntimeError,
+        ) as e:
             logger.exception(f"Error processing notification: {e}")
             message.nack()
 
@@ -927,7 +933,13 @@ class GmailSync:
                     if (stored + updated) % 100 == 0:
                         logger.info(f"Progress: stored {stored}, updated {updated}")
 
-                except (HttpError, psycopg2.Error) as e:
+                except (
+                    HttpError,
+                    psycopg2.Error,
+                    urllib.error.URLError,
+                    TimeoutError,
+                    RuntimeError,
+                ) as e:
                     logger.error(f"Failed to process {gmail_id}: {e}")
 
             page_token = result.get("nextPageToken")
