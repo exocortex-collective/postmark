@@ -357,16 +357,24 @@ class GmailSync:
 
         If message already exists, we still update label_ids from Gmail
         (to capture any label changes) but skip body/attachments/parse enqueue.
+
+        If message was deleted (404), logs and returns without error.
         """
         already_exists = self._email_exists(gmail_id)
 
         # Fetch from Gmail API (outside transaction) - always fetch to get current labels
-        msg = (
-            self.gmail.users()
-            .messages()
-            .get(userId="me", id=gmail_id, format="full")
-            .execute()
-        )
+        try:
+            msg = (
+                self.gmail.users()
+                .messages()
+                .get(userId="me", id=gmail_id, format="full")
+                .execute()
+            )
+        except HttpError as e:
+            if e.resp.status == 404:
+                logger.info(f"Message {gmail_id} not found (deleted), skipping")
+                return
+            raise
 
         # If already exists, just update labels and return
         if already_exists:
