@@ -857,7 +857,7 @@ class GmailSync:
             after: Absolute date in YYYY-MM-DD format (e.g., "2025-01-01")
 
         Returns:
-            Tuple of (stored_count, skipped_count)
+            Tuple of (stored_count, updated_count) - new messages and label updates
         """
         if after:
             # Parse absolute date with validation
@@ -879,7 +879,7 @@ class GmailSync:
         query = f"after:{after_date}"
 
         stored = 0
-        skipped = 0
+        updated = 0
         newest_message_id: str | None = None
         page_token: str | None = None
 
@@ -908,25 +908,26 @@ class GmailSync:
             # Process this page (reverse to go oldest first within page)
             for msg in reversed(messages):
                 gmail_id = msg["id"]
-                if self._email_exists(gmail_id):
-                    skipped += 1
-                    continue
+                already_exists = self._email_exists(gmail_id)
 
                 try:
                     self.store_raw_message(gmail_id)
-                    stored += 1
+                    if already_exists:
+                        updated += 1
+                    else:
+                        stored += 1
 
-                    if (stored + skipped) % 100 == 0:
-                        logger.info(f"Progress: stored {stored}, skipped {skipped}")
+                    if (stored + updated) % 100 == 0:
+                        logger.info(f"Progress: stored {stored}, updated {updated}")
 
                 except (HttpError, psycopg2.Error) as e:
-                    logger.error(f"Failed to store {gmail_id}: {e}")
+                    logger.error(f"Failed to process {gmail_id}: {e}")
 
             page_token = result.get("nextPageToken")
             if not page_token:
                 break
 
-        logger.info(f"Checked {stored + skipped} messages total")
+        logger.info(f"Processed {stored + updated} messages total")
 
         # Update history baseline if we stored new messages
         if newest_message_id and stored > 0:
@@ -952,8 +953,8 @@ class GmailSync:
                     self._set_last_history_id(email_address, newest_history_id)
                     logger.info(f"Updated history baseline to {newest_history_id}")
 
-        logger.info(f"Backfill complete: stored {stored}, skipped {skipped}")
-        return stored, skipped
+        logger.info(f"Backfill complete: stored {stored}, updated {updated}")
+        return stored, updated
 
     def fallback_poll(self) -> None:
         """Hourly fallback poll to catch missed notifications."""
