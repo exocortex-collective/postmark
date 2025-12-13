@@ -60,11 +60,13 @@ This is intentional - it keeps the system simple and avoids the complexity of mu
         ▼        ▼        ▼              ▼
 ┌─────────────┐ ┌─────────────┐ ┌───────────────┐
 │  Postgres   │ │  DuckDB API │ │ Queue: parse  │
-│ emails_raw  │ │ email_bodies│ │ Queue: attach │
-│ gmail_labels│ │ (via REST)  │ │ Queue: triage │
-│ attachments │ └─────────────┘ └───────┬───────┘
-│ sync_state  │                         │
-└─────────────┘                         │
+│ emails_raw  │ │ (REST API)  │ │ Queue: attach │
+│ gmail_labels│ └──────┬──────┘ │ Queue: triage │
+│ attachments │        ▼        └───────┬───────┘
+│ sync_state  │ ┌─────────────┐         │
+└─────────────┘ │   DuckDB    │         │
+                │ email_bodies│         │
+                └─────────────┘         │
                                         ▼
          ┌──────────────────────────────────────────────────┐
          │                Workers (parallel)                │
@@ -100,7 +102,10 @@ The **duckdb-api** holds the write lock on DuckDB and exposes endpoints:
 - `GET /health` - Health check
 - `GET /stats` - Email count, size
 - `GET /body?gmail_id=X` - Single body
-- `POST /bodies` - Batch body fetch
+- `GET /bodies?gmail_ids=X,Y,Z` - Batch body fetch
+- `GET /gmail_ids` - List all gmail IDs in DuckDB
+- `GET /mail_text?gmail_id=X` - Extract plain text from email
+- `GET /checkpoint` - Get current checkpoint for sync
 
 ## Gmail Push Notification Flow
 
@@ -163,7 +168,7 @@ CREATE TABLE gmail_labels (
     id TEXT PRIMARY KEY,            -- Gmail label ID (e.g., "Label_123")
     name TEXT NOT NULL,             -- Full label name (e.g., "Cortex/Uncategorized")
     name_parts TEXT[] NOT NULL,     -- Path parts for hierarchy queries
-    type TEXT,                       -- 'system' or 'user'
+    type TEXT CHECK (type IN ('system', 'user')),  -- 'system' or 'user'
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -173,7 +178,7 @@ CREATE INDEX idx_gmail_labels_parts ON gmail_labels USING GIN(name_parts);
 -- Attachment metadata (written by attachment-worker)
 CREATE TABLE attachments (
     id BIGSERIAL PRIMARY KEY,
-    gmail_id TEXT NOT NULL,
+    gmail_id TEXT NOT NULL REFERENCES emails_raw(gmail_id) ON DELETE CASCADE,
     attachment_id TEXT NOT NULL,
     filename TEXT,
     mime_type TEXT,
