@@ -100,13 +100,13 @@ postmark runs as 4 Docker containers:
 
 The **duckdb-api** holds the write lock on DuckDB and exposes endpoints:
 - `GET /health` - Health check
-- `GET /stats` - Email count
-- `GET /body?gmail_id=X` - Single body
-- `POST /body` - Store an email body
-- `GET /bodies?gmail_ids=X,Y,Z` - Batch body fetch
-- `GET /gmail_ids` - List all gmail IDs in DuckDB
-- `GET /mail_text?gmail_id=X` - Extract plain text from email
-- `POST /checkpoint` - Force a WAL checkpoint
+- `GET /stats` - Get total count of email bodies in DuckDB
+- `GET /body?gmail_id=X` - Get raw parts, body data, and parsed text for a single email
+- `POST /body` - Store raw parts and body data for an email
+- `GET /bodies?gmail_ids=X,Y,Z` - Batch fetch email bodies for a list of IDs
+- `GET /gmail_ids` - List all gmail IDs stored in DuckDB
+- `GET /mail_text?gmail_id=X` - Extract and return just the plain text content of an email
+- `POST /checkpoint` - Force a WAL checkpoint to flush data to the main database file
 
 ## Gmail Push Notification Flow
 
@@ -170,7 +170,7 @@ CREATE TABLE gmail_labels (
     name TEXT NOT NULL,             -- Full label name (e.g., "Cortex/Uncategorized")
     name_parts TEXT[] NOT NULL,     -- Path parts for hierarchy queries
     type TEXT CHECK (type IN ('system', 'user')),  -- 'system' or 'user'
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    updated_at TIMESTAMPTZ DEFAULT NOW()  -- Last sync timestamp
 );
 
 CREATE INDEX idx_gmail_labels_name ON gmail_labels(name);
