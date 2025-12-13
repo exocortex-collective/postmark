@@ -79,12 +79,12 @@ This is intentional - it keeps the system simple and avoids the complexity of mu
                    │
                    │ Queue: 'triage'
                    ▼
-         ┌───────────────┐
-         │    triage     │  (separate service)
-         │ - Rules engine│
-         │ - LLM fallback│
-         │ - Gmail labels│
-         └───────────────┘
+         ┌────────────────┐
+         │     triage     │  (separate service)
+         │ - Rules engine │
+         │ - LLM fallback │
+         │ - Gmail labels │
+         └────────────────┘
 ```
 
 ## Services
