@@ -61,8 +61,8 @@ This is intentional - it keeps the system simple and avoids the complexity of mu
 ┌─────────────┐ ┌─────────────┐ ┌───────────────┐
 │  Postgres   │ │  DuckDB API │ │ Queue: parse  │
 │ emails_raw  │ │ (REST API)  │ │ Queue: attach │
-│ gmail_labels│ └──────┬──────┘ │ Queue: triage │
-│ attachments │        ▼        └───────┬───────┘
+│ gmail_labels│ └──────┬──────┘ └───────┬───────┘
+│ attachments │        ▼                │
 │ sync_state  │ ┌─────────────┐         │
 └─────────────┘ │   DuckDB    │         │
                 │ email_bodies│         │
@@ -74,11 +74,11 @@ This is intentional - it keeps the system simple and avoids the complexity of mu
          │  │ parse-worker │  │ attachment-worker         │ │
          │  │ Headers→     │  │ Gmail API→S3/Minio        │ │
          │  │ emails_parsed│  │ Updates attachments table │ │
-         │  └──────────────┘  └───────────────────────────┘ │
-         └──────────────────────────────────────────────────┘
-                 │
-                 │ Queue: 'triage'
-                 ▼
+         │  └──────┬───────┘  └───────────────────────────┘ │
+         └─────────┼──────────────────────────────────────────┘
+                   │
+                   │ Queue: 'triage'
+                   ▼
          ┌───────────────┐
          │    triage     │  (separate service)
          │ - Rules engine│
