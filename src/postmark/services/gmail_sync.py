@@ -380,7 +380,7 @@ class GmailSync:
                         )
                     conn.commit()
                     logger.debug(f"Message {gmail_id} exists, updated labels")
-                except Exception as e:
+                except psycopg2.Error as e:
                     conn.rollback()
                     logger.error(
                         f"Failed to update labels for {gmail_id}, rolled back: {e}"
@@ -456,7 +456,7 @@ class GmailSync:
                 conn.commit()
                 logger.info(f"Stored message {gmail_id}")
 
-            except Exception as e:
+            except psycopg2.Error as e:
                 conn.rollback()
                 logger.error(f"Failed to store message {gmail_id}, rolled back: {e}")
                 raise
@@ -636,7 +636,7 @@ class GmailSync:
                 # Commit the label event transaction
                 conn.commit()
 
-            except Exception as e:
+            except psycopg2.Error as e:
                 conn.rollback()
                 logger.error(
                     f"Failed to process label event for {gmail_id}, rolled back: {e}"
@@ -681,7 +681,7 @@ class GmailSync:
                 else:
                     logger.debug(f"Message {gmail_id} not found for soft delete")
 
-            except Exception as e:
+            except psycopg2.Error as e:
                 conn.rollback()
                 logger.error(f"Failed to soft delete {gmail_id}: {e}")
                 raise
@@ -765,7 +765,7 @@ class GmailSync:
             self._set_last_history_id(email_address, new_id)
             message.ack()
 
-        except Exception as e:
+        except (HttpError, psycopg2.Error) as e:
             logger.exception(f"Error processing notification: {e}")
             message.nack()
 
@@ -830,7 +830,7 @@ class GmailSync:
                 f"Watch renewed for {email_address}, expires at {expiration_dt}"
             )
 
-        except Exception as e:
+        except (HttpError, psycopg2.Error) as e:
             logger.exception(f"Failed to renew watch: {e}")
 
     def backfill(
@@ -908,7 +908,7 @@ class GmailSync:
                     if (stored + skipped) % 100 == 0:
                         logger.info(f"Progress: stored {stored}, skipped {skipped}")
 
-                except Exception as e:
+                except (HttpError, psycopg2.Error) as e:
                     logger.error(f"Failed to store {gmail_id}: {e}")
 
             page_token = result.get("nextPageToken")
