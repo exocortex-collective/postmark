@@ -822,13 +822,14 @@ class GmailSync:
 
     def _get_current_user_email(self) -> str:
         """Get the email address of the authenticated user (cached, thread-safe)."""
-        if self._current_user_email is None:
+        email = self._current_user_email
+        if email is None:
             with self._current_user_email_lock:
-                # Double-checked locking to avoid acquiring the lock unnecessarily
-                if self._current_user_email is None:
+                email = self._current_user_email
+                if email is None:
                     profile = self.gmail.users().getProfile(userId="me").execute()
-                    self._current_user_email = str(profile["emailAddress"])
-        return self._current_user_email
+                    self._current_user_email = email = str(profile["emailAddress"])
+        return email
 
     def _get_watch_expiration(self) -> datetime | None:
         """Get the current watch expiration time from database."""
