@@ -755,32 +755,55 @@ class GmailSync:
                 raise
 
             # Process history records
+            # IMPORTANT: History ID checkpoint safety
+            # - Each message operation commits independently (for isolation)
+            # - If ANY operation fails, exception propagates and we nack
+            # - History ID only updates AFTER all records are processed
+            # - On retry, idempotency (ON CONFLICT DO NOTHING) prevents duplicates
+            # - This ensures no data loss on crash mid-batch
+            messages_added = 0
+            messages_deleted = 0
+            label_events = 0
+
             for record in history_response.get("history", []):
                 # New messages
                 for msg_added in record.get("messagesAdded", []):
                     msg_id = msg_added["message"]["id"]
                     self.store_raw_message(msg_id)
+                    messages_added += 1
 
                 # Deleted messages - soft delete and cancel pending jobs
                 for msg_deleted in record.get("messagesDeleted", []):
                     msg_id = msg_deleted["message"]["id"]
                     self._process_message_deleted(msg_id)
+                    messages_deleted += 1
 
                 # Label additions - enqueue Cortex/* labels for actions service
                 for label_added in record.get("labelsAdded", []):
                     msg_id = label_added["message"]["id"]
                     label_ids = label_added.get("labelIds", [])
                     self._process_label_event(msg_id, label_ids, "added")
+                    label_events += 1
 
                 # Label removals - track for corrections
                 for label_removed in record.get("labelsRemoved", []):
                     msg_id = label_removed["message"]["id"]
                     label_ids = label_removed.get("labelIds", [])
                     self._process_label_event(msg_id, label_ids, "removed")
+                    label_events += 1
 
-            # Update history ID
+            # Update history ID checkpoint ONLY after all records processed successfully
+            # This is the critical safety point - if we crash before here, we'll
+            # reprocess from the old history_id (safe due to idempotency)
             new_id = history_response.get("historyId", new_history_id)
             self._set_last_history_id(email_address, new_id)
+
+            if messages_added or messages_deleted or label_events:
+                logger.info(
+                    f"Processed history batch: +{messages_added} msgs, "
+                    f"-{messages_deleted} deleted, {label_events} label events"
+                )
+
             message.ack()
 
         except (
