@@ -843,11 +843,11 @@ class GmailSync:
         time_until_expiry = expiration - now
 
         if time_until_expiry.total_seconds() < 0:
-            logger.error(
-                f"CRITICAL: Watch has EXPIRED at {expiration}! "
+            logger.critical(
+                f"Watch has EXPIRED at {expiration}! "
                 "Push notifications are not being received."
             )
-        elif time_until_expiry.total_seconds() < 86400:  # Less than 1 day
+        elif time_until_expiry < timedelta(days=1):
             logger.warning(
                 f"Watch expiring soon: {expiration} "
                 f"({time_until_expiry.total_seconds() / 3600:.1f} hours remaining)"
