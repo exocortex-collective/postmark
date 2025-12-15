@@ -86,8 +86,9 @@ class GmailSync:
         self._label_cache_lock = threading.Lock()
         self._label_sync_lock = threading.Lock()  # Prevents thundering herd on sync
 
-        # Cache for authenticated user's email address
+        # Cache for authenticated user's email address (with lock for thread-safety)
         self._current_user_email: str | None = None
+        self._current_user_email_lock = threading.Lock()
 
         # Thread-local storage for Gmail clients (httplib2 is not thread-safe)
         self._thread_local = threading.local()
@@ -820,10 +821,13 @@ class GmailSync:
             message.nack()
 
     def _get_current_user_email(self) -> str:
-        """Get the email address of the authenticated user (cached)."""
+        """Get the email address of the authenticated user (cached, thread-safe)."""
         if self._current_user_email is None:
-            profile = self.gmail.users().getProfile(userId="me").execute()
-            self._current_user_email = str(profile["emailAddress"])
+            with self._current_user_email_lock:
+                # Double-checked locking to avoid acquiring the lock unnecessarily
+                if self._current_user_email is None:
+                    profile = self.gmail.users().getProfile(userId="me").execute()
+                    self._current_user_email = str(profile["emailAddress"])
         return self._current_user_email
 
     def _get_watch_expiration(self) -> datetime | None:
