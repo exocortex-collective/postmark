@@ -1071,10 +1071,10 @@ class GmailSync:
         """Wrapper for scheduled watch renewal that won't crash scheduler."""
         try:
             self.renew_watch()
-        except Exception:
+        except Exception as e:
             # Already logged at CRITICAL level in renew_watch()
             # Don't re-raise here to keep scheduler running
-            pass
+            logger.debug(f"Handled exception during scheduled watch renewal: {e!r}")
 
     def run(self) -> None:
         """Main entry point - start the service."""
