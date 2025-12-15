@@ -10,7 +10,7 @@ import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import psycopg2
@@ -85,6 +85,10 @@ class GmailSync:
         self._label_cache: dict[str, str] = {}
         self._label_cache_lock = threading.Lock()
         self._label_sync_lock = threading.Lock()  # Prevents thundering herd on sync
+
+        # Cache for authenticated user's email address (with lock for thread-safety)
+        self._current_user_email: str | None = None
+        self._current_user_email_lock = threading.Lock()
 
         # Thread-local storage for Gmail clients (httplib2 is not thread-safe)
         self._thread_local = threading.local()
@@ -817,12 +821,58 @@ class GmailSync:
             message.nack()
 
     def _get_current_user_email(self) -> str:
-        """Get the email address of the authenticated user."""
-        profile = self.gmail.users().getProfile(userId="me").execute()
-        return str(profile["emailAddress"])
+        """Get the email address of the authenticated user (cached, thread-safe)."""
+        email = self._current_user_email
+        if email is None:
+            with self._current_user_email_lock:
+                email = self._current_user_email
+                if email is None:
+                    profile = self.gmail.users().getProfile(userId="me").execute()
+                    self._current_user_email = email = str(profile["emailAddress"])
+        return email
+
+    def _get_watch_expiration(self) -> datetime | None:
+        """Get the current watch expiration time from database."""
+        email_address = self._get_current_user_email()
+        with self._get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT watch_expiration FROM sync_state WHERE email_address = %s",
+                (email_address,),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+
+    def _check_watch_health(self) -> None:
+        """Check watch expiration and log warnings if close to expiring."""
+        expiration = self._get_watch_expiration()
+        if expiration is None:
+            logger.warning("No watch expiration found - watch may not be set up")
+            return
+
+        now = datetime.now(expiration.tzinfo)
+        time_until_expiry = expiration - now
+
+        if time_until_expiry.total_seconds() < 0:
+            logger.critical(
+                f"Watch has EXPIRED at {expiration}! "
+                "Push notifications are not being received."
+            )
+        elif time_until_expiry < timedelta(days=1):
+            logger.warning(
+                f"Watch expiring soon: {expiration} "
+                f"({time_until_expiry.total_seconds() / 3600:.1f} hours remaining)"
+            )
+        else:
+            logger.info(
+                f"Watch healthy, expires {expiration} "
+                f"({time_until_expiry.days} days remaining)"
+            )
 
     def renew_watch(self) -> None:
-        """Renew Gmail push notification registration."""
+        """Renew Gmail push notification registration.
+
+        Raises on failure so errors are visible to alerting systems.
+        """
         try:
             response = (
                 self.gmail.users()
@@ -838,7 +888,9 @@ class GmailSync:
             )
 
             expiration_ms = int(response["expiration"])
-            expiration_dt = datetime.fromtimestamp(expiration_ms / 1000)
+            expiration_dt = datetime.fromtimestamp(
+                expiration_ms / 1000, tz=timezone.utc
+            )
             history_id = str(response["historyId"])
 
             # Get the actual email address for this user
@@ -877,8 +929,12 @@ class GmailSync:
                 f"Watch renewed for {email_address}, expires at {expiration_dt}"
             )
 
-        except (HttpError, psycopg2.Error) as e:
-            logger.exception(f"Failed to renew watch: {e}")
+        except Exception as e:
+            # Log at CRITICAL level so alerting systems catch this
+            # Use exc_info=True to preserve stack trace for debugging
+            logger.critical(f"FAILED to renew Gmail watch: {e}", exc_info=True)
+            # Re-raise so the error is visible and can trigger alerts
+            raise
 
     def backfill(
         self, days: int | None = None, after: str | None = None
@@ -1011,15 +1067,26 @@ class GmailSync:
             schedule.run_pending()
             time.sleep(60)
 
+    def _safe_renew_watch(self) -> None:
+        """Wrapper for scheduled watch renewal that won't crash scheduler."""
+        try:
+            self.renew_watch()
+        except Exception as e:
+            # Already logged at CRITICAL level in renew_watch()
+            # Don't re-raise here to keep scheduler running
+            logger.debug(f"Handled exception during scheduled watch renewal: {e!r}")
+
     def run(self) -> None:
         """Main entry point - start the service."""
         logger.info("Starting Gmail sync service")
 
-        # Renew watch on startup
+        # Check watch health and renew on startup
+        self._check_watch_health()
         self.renew_watch()
 
         # Schedule recurring tasks
-        schedule.every().day.at("00:00").do(self.renew_watch)
+        # Renew watch every 12 hours (watch expires after 7 days, so plenty of buffer)
+        schedule.every(12).hours.do(self._safe_renew_watch)
         schedule.every().hour.do(self.fallback_poll)
 
         # Start scheduler in background thread
