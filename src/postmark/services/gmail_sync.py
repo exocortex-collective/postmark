@@ -10,7 +10,7 @@ import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import psycopg2
@@ -85,6 +85,9 @@ class GmailSync:
         self._label_cache: dict[str, str] = {}
         self._label_cache_lock = threading.Lock()
         self._label_sync_lock = threading.Lock()  # Prevents thundering herd on sync
+
+        # Cache for authenticated user's email address
+        self._current_user_email: str | None = None
 
         # Thread-local storage for Gmail clients (httplib2 is not thread-safe)
         self._thread_local = threading.local()
@@ -817,9 +820,11 @@ class GmailSync:
             message.nack()
 
     def _get_current_user_email(self) -> str:
-        """Get the email address of the authenticated user."""
-        profile = self.gmail.users().getProfile(userId="me").execute()
-        return str(profile["emailAddress"])
+        """Get the email address of the authenticated user (cached)."""
+        if self._current_user_email is None:
+            profile = self.gmail.users().getProfile(userId="me").execute()
+            self._current_user_email = str(profile["emailAddress"])
+        return self._current_user_email
 
     def _get_watch_expiration(self) -> datetime | None:
         """Get the current watch expiration time from database."""
@@ -878,7 +883,9 @@ class GmailSync:
             )
 
             expiration_ms = int(response["expiration"])
-            expiration_dt = datetime.fromtimestamp(expiration_ms / 1000)
+            expiration_dt = datetime.fromtimestamp(
+                expiration_ms / 1000, tz=timezone.utc
+            )
             history_id = str(response["historyId"])
 
             # Get the actual email address for this user
@@ -917,9 +924,10 @@ class GmailSync:
                 f"Watch renewed for {email_address}, expires at {expiration_dt}"
             )
 
-        except (HttpError, psycopg2.Error) as e:
+        except Exception as e:
             # Log at CRITICAL level so alerting systems catch this
-            logger.critical(f"FAILED to renew Gmail watch: {e}")
+            # Use exc_info=True to preserve stack trace for debugging
+            logger.critical(f"FAILED to renew Gmail watch: {e}", exc_info=True)
             # Re-raise so the error is visible and can trigger alerts
             raise
 
