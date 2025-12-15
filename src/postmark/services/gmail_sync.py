@@ -839,7 +839,7 @@ class GmailSync:
             logger.warning("No watch expiration found - watch may not be set up")
             return
 
-        now = datetime.now()
+        now = datetime.now(expiration.tzinfo)
         time_until_expiry = expiration - now
 
         if time_until_expiry.total_seconds() < 0:
@@ -1058,10 +1058,10 @@ class GmailSync:
         """Wrapper for scheduled watch renewal that won't crash scheduler."""
         try:
             self.renew_watch()
-        except Exception as e:
+        except Exception:
             # Already logged at CRITICAL level in renew_watch()
             # Don't re-raise here to keep scheduler running
-            logger.error(f"Scheduled watch renewal failed: {e}")
+            pass
 
     def run(self) -> None:
         """Main entry point - start the service."""
