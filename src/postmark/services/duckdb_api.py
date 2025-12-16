@@ -19,7 +19,7 @@ import html2text
 import uvicorn
 from cortex_utils.metrics import ERRORS, start_metrics_server
 from fastapi import FastAPI, HTTPException, Query, Request
-from prometheus_client import Counter, Gauge, Histogram
+from prometheus_client import REGISTRY, Counter, Gauge, Histogram
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
@@ -30,13 +30,31 @@ DUCKDB_PATH = os.environ.get("DUCKDB_PATH", "/app/data/emails.duckdb")
 HOST = os.environ.get("DUCKDB_API_HOST", "0.0.0.0")
 PORT = int(os.environ.get("DUCKDB_API_PORT", "8081"))
 
-# HTTP metrics
-HTTP_REQUESTS = Counter(
+
+def _get_or_create_metric(
+    metric_class: type,
+    name: str,
+    description: str,
+    labelnames: list[str] = [],
+    **kwargs: Any,
+) -> Any:
+    """Get existing metric or create new one (handles uvicorn reload)."""
+    # Check if metric already exists in registry
+    for collector in REGISTRY._names_to_collectors.values():
+        if hasattr(collector, "_name") and collector._name == name:
+            return collector
+    return metric_class(name, description, labelnames, **kwargs)
+
+
+# HTTP metrics (guarded against duplicate registration)
+HTTP_REQUESTS = _get_or_create_metric(
+    Counter,
     "duckdb_api_http_requests_total",
     "Total HTTP requests",
     ["method", "endpoint", "status"],
 )
-HTTP_REQUEST_DURATION = Histogram(
+HTTP_REQUEST_DURATION = _get_or_create_metric(
+    Histogram,
     "duckdb_api_http_request_duration_seconds",
     "HTTP request latency",
     ["method", "endpoint"],
@@ -44,22 +62,26 @@ HTTP_REQUEST_DURATION = Histogram(
 )
 
 # DuckDB metrics
-DUCKDB_QUERIES = Counter(
+DUCKDB_QUERIES = _get_or_create_metric(
+    Counter,
     "duckdb_api_queries_total",
     "Total DuckDB queries executed",
-    ["operation"],  # read, write
+    ["operation"],
 )
-DUCKDB_QUERY_DURATION = Histogram(
+DUCKDB_QUERY_DURATION = _get_or_create_metric(
+    Histogram,
     "duckdb_api_query_duration_seconds",
     "DuckDB query latency",
     ["operation"],
     buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0),
 )
-DUCKDB_ROWS = Gauge(
+DUCKDB_ROWS = _get_or_create_metric(
+    Gauge,
     "duckdb_api_rows_total",
     "Total rows in email_bodies table",
 )
-DUCKDB_DATABASE_SIZE = Gauge(
+DUCKDB_DATABASE_SIZE = _get_or_create_metric(
+    Gauge,
     "duckdb_api_database_size_bytes",
     "Size of DuckDB database file",
 )
