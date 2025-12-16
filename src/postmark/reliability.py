@@ -160,6 +160,10 @@ class BackoffConfig:
     jitter: float = 0.1  # Random jitter factor (0-1)
     max_retries: int = 3  # Max retry attempts
 
+    def __post_init__(self) -> None:
+        if self.max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
+
 
 def calculate_backoff_delay(attempt: int, config: BackoffConfig) -> float:
     """Calculate delay for a given retry attempt (0-indexed).
@@ -209,7 +213,9 @@ def retry_with_backoff(
                 )
                 time.sleep(delay)
 
-    raise last_exception  # type: ignore[misc]
+    # last_exception is guaranteed to be set since max_retries >= 0 (validated in __post_init__)
+    assert last_exception is not None
+    raise last_exception
 
 
 @dataclass
@@ -274,9 +280,9 @@ class GracefulShutdown:
             True if all work completed, False if timeout reached
         """
         with self._condition:
-            end_time = time.time() + timeout
+            end_time = time.monotonic() + timeout
             while self._in_flight > 0:
-                remaining = end_time - time.time()
+                remaining = end_time - time.monotonic()
                 if remaining <= 0:
                     logger.warning(
                         f"Shutdown timeout: {self._in_flight} jobs still in flight"

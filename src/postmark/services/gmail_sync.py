@@ -29,8 +29,8 @@ from postmark.reliability import (
     CircuitBreakerConfig,
     CircuitOpenError,
     GracefulShutdown,
-    calculate_backoff_delay,
     call_with_circuit_breaker,
+    retry_with_backoff,
 )
 
 logging.basicConfig(
@@ -798,28 +798,16 @@ class GmailSync:
             CircuitOpenError,
         )
 
-        last_exception: Exception | None = None
-
-        for attempt in range(self._backoff_config.max_retries + 1):
-            try:
-                self._process_notification_inner(message)
-                return  # Success
-            except retryable_exceptions as e:
-                last_exception = e
-                if attempt < self._backoff_config.max_retries:
-                    delay = calculate_backoff_delay(attempt, self._backoff_config)
-                    logger.warning(
-                        f"Notification processing attempt {attempt + 1}/"
-                        f"{self._backoff_config.max_retries + 1} failed: {e}. "
-                        f"Retrying in {delay:.2f}s"
-                    )
-                    time.sleep(delay)
-
-        # All retries exhausted
-        logger.exception(
-            f"Error processing notification after retries: {last_exception}"
-        )
-        message.nack()
+        try:
+            retry_with_backoff(
+                lambda: self._process_notification_inner(message),
+                config=self._backoff_config,
+                retryable_exceptions=retryable_exceptions,
+            )
+        except Exception as e:
+            # All retries exhausted
+            logger.exception(f"Error processing notification after retries: {e}")
+            message.nack()
 
     def _process_notification_inner(
         self, message: pubsub_v1.subscriber.message.Message
