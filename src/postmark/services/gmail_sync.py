@@ -1271,9 +1271,10 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Start metrics server on port 8000
-    start_metrics_server(port=8000)
-    logger.info("Metrics server started on port 8000")
+    # Start metrics server
+    metrics_port = int(os.environ.get("METRICS_PORT", "8000"))
+    start_metrics_server(port=metrics_port)
+    logger.info(f"Metrics server started on port {metrics_port}")
 
     config = GmailSyncConfig.from_env()
     sync = GmailSync(config)

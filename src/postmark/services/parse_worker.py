@@ -525,8 +525,9 @@ def main() -> None:
         sys.exit(1)
 
     # Start metrics server
-    start_metrics_server(port=8001)
-    logger.info("Metrics server started on port 8001")
+    metrics_port = int(os.environ.get("METRICS_PORT", "8001"))
+    start_metrics_server(port=metrics_port)
+    logger.info(f"Metrics server started on port {metrics_port}")
 
     config = Config(
         postgres_host=os.environ["POSTGRES_HOST"],

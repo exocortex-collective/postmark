@@ -278,18 +278,20 @@ class MetricsMiddleware(BaseHTTPMiddleware):
         response: Response = await call_next(request)
         duration = time.time() - start_time
 
-        # Normalize path for metrics (avoid cardinality explosion)
-        path = request.url.path
+        # Use route path template to avoid cardinality explosion with path params
+        route = request.scope.get("route")
+        endpoint = route.path if route else request.url.path
+
         # Skip metrics endpoint to avoid recursion
-        if path != "/metrics":
+        if endpoint != "/metrics":
             HTTP_REQUESTS.labels(
                 method=request.method,
-                endpoint=path,
+                endpoint=endpoint,
                 status=response.status_code,
             ).inc()
             HTTP_REQUEST_DURATION.labels(
                 method=request.method,
-                endpoint=path,
+                endpoint=endpoint,
             ).observe(duration)
 
             # Track errors
@@ -515,8 +517,9 @@ def checkpoint() -> StatusResponse:
 def main() -> None:
     """Run the DuckDB API server."""
     # Start metrics server on separate port
-    start_metrics_server(port=8003)
-    logger.info("Metrics server started on port 8003")
+    metrics_port = int(os.environ.get("METRICS_PORT", "8003"))
+    start_metrics_server(port=metrics_port)
+    logger.info(f"Metrics server started on port {metrics_port}")
 
     uvicorn.run(
         "postmark.services.duckdb_api:app",
