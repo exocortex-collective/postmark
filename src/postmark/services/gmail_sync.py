@@ -523,39 +523,43 @@ class GmailSync:
                     )
 
                     # Enqueue for parsing (idempotent - skips if already pending/processing)
+                    # Uses INSERT ... WHERE NOT EXISTS for partitioned table compatibility
                     cur.execute(
                         """
                         INSERT INTO queue (queue_name, payload)
-                        VALUES ('parse', %s)
-                        ON CONFLICT (queue_name, (payload->>'gmail_id'))
-                            WHERE queue_name IN ('parse', 'triage', 'actions')
+                        SELECT 'parse', %s
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM queue
+                            WHERE queue_name = 'parse'
+                              AND payload->>'gmail_id' = %s
                               AND status IN ('pending', 'processing')
-                        DO NOTHING
+                        )
                         """,
-                        (json.dumps({"gmail_id": gmail_id}),),
+                        (json.dumps({"gmail_id": gmail_id}), gmail_id),
                     )
 
-                    # Enqueue attachments for separate fetch (idempotent, bulk insert)
-                    if attachment_ids:
-                        attachment_jobs = [
+                    # Enqueue attachments for separate fetch (idempotent)
+                    # Uses INSERT ... WHERE NOT EXISTS for partitioned table compatibility
+                    for att_id in attachment_ids:
+                        cur.execute(
+                            """
+                            INSERT INTO queue (queue_name, payload)
+                            SELECT 'attachment', %s
+                            WHERE NOT EXISTS (
+                                SELECT 1 FROM queue
+                                WHERE queue_name = 'attachment'
+                                  AND payload->>'gmail_id' = %s
+                                  AND payload->>'attachment_id' = %s
+                                  AND status IN ('pending', 'processing')
+                            )
+                            """,
                             (
-                                "attachment",
                                 json.dumps(
                                     {"gmail_id": gmail_id, "attachment_id": att_id}
                                 ),
-                            )
-                            for att_id in attachment_ids
-                        ]
-                        execute_values(
-                            cur,
-                            """
-                            INSERT INTO queue (queue_name, payload) VALUES %s
-                            ON CONFLICT (queue_name, (payload->>'gmail_id'), (payload->>'attachment_id'))
-                                WHERE queue_name = 'attachment'
-                                  AND status IN ('pending', 'processing')
-                            DO NOTHING
-                            """,
-                            attachment_jobs,
+                                gmail_id,
+                                att_id,
+                            ),
                         )
 
                 # Commit the entire message transaction
