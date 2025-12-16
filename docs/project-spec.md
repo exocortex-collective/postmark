@@ -580,41 +580,16 @@ DuckDB bodies enable efficient full-text search. Future integration with:
 - Obsidian search
 - MCP server for Claude queries
 
-## Reliability Checklist
+## Reliability Status
 
-### Critical (Data Loss Risk)
+**Completed:**
+- [x] History ID checkpoint - idempotent processing with ON CONFLICT
+- [x] Discord exception reporting - alerter daemon monitors container logs
+- [x] Queue partitioning - daily partitioned queue table (cortex-utils)
+- [x] Dead letter table - failed jobs preserved before partition drop
+- [x] Partition maintenance cron - daily job via Ofelia at 2 AM
 
-- [x] **History ID checkpoint** - History_id only updates AFTER all records processed; idempotency (ON CONFLICT) ensures safe retries
-- [ ] **Pub/Sub exponential backoff** - Add retry with backoff before nack (prevents thundering herd on transient failures)
-- [ ] **DuckDB API circuit breaker** - Add circuit breaker pattern to DuckDB API calls (prevents cascade failure when API is slow/down)
-
-### High Priority
-
-- [ ] **Idempotent job processing** - Add deduplication token or `ON CONFLICT DO NOTHING` to prevent duplicate processing after visibility timeout
-- [ ] **Stream large attachments** - Use chunked downloads + multipart S3 uploads instead of loading entire attachment into memory (prevents OOM on large files)
-- [ ] **S3 bucket creation race fix** - Handle "bucket already exists" error gracefully when parallel workers start
-- [ ] **Gmail API error classification** - Distinguish 404 (permanent) from 5XX (transient) errors, only retry transient ones
-- [ ] **Connection pool health checks** - Add periodic connection validation, prevent stale connections
-
-### Medium Priority
-
-- [ ] **Graceful shutdown** - Wait for in-flight jobs to complete before exit (prevents jobs stuck in "processing" forever)
-- [ ] **DuckDB API pagination** - Add default limit to `/gmail_ids` endpoint (prevents OOM on large mailboxes)
-- [ ] **HTML detection improvements** - Reduce false positives in `_looks_like_html()` function
-- [ ] **JSON parsing error handling** - Add try/except around `json.loads()` in DuckDB API endpoints
-
-### Observability
-
-- [ ] **Prometheus metrics** - Expose `/metrics` with: `postmark_emails_processed_total`, `postmark_queue_depth`, `postmark_dead_letters_total`, `postmark_gmail_api_latency_seconds` (depends on Prometheus stack in CLAUDE.md)
-- [ ] **Structured logging** - Standardize on structlog JSON format across all services
-- [x] **Discord exception reporting** - Alerter daemon monitors container logs, sends critical errors to Discord (cortex-utils)
-
-### Operational
-
-- [x] **Queue partitioning** - Migrated to daily partitioned queue table (cortex-utils)
-- [x] **Dead letter table** - Failed jobs preserved in dead_letter table before partition drop
-- [x] **Partition maintenance cron** - Daily job via Ofelia at 2 AM (cortex-utils)
-- [ ] **Database indexes** - Add index on `queue.status` for faster pending job queries
+**Remaining work tracked in beads** - `~/go/bin/bd list --json | jq '.[] | select(.description | contains("postmark"))'`
 
 ## Testing
 
