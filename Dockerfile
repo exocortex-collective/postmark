@@ -2,8 +2,10 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
-# Install uv
-RUN pip install uv
+# Install git (needed for git dependencies) and uv
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install uv
 
 # Copy everything needed for build
 COPY pyproject.toml uv.lock README.md ./
