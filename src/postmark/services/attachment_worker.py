@@ -21,6 +21,8 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 
+from postmark.reliability import GracefulShutdown
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -52,7 +54,7 @@ class Config:
 class AttachmentWorker:
     def __init__(self, config: Config):
         self.config = config
-        self.running = True
+        self._shutdown = GracefulShutdown()
         self._pg_conn: psycopg2.extensions.connection | None = None
         self._s3_client: Any = None  # boto3 S3 client (dynamically typed)
         self._gmail_service: Resource | None = None
@@ -356,7 +358,7 @@ class AttachmentWorker:
             return False
 
     def run(self) -> None:
-        """Main processing loop."""
+        """Main processing loop with graceful shutdown support."""
         self._ensure_schema()
 
         logger.info("Attachment worker started")
@@ -364,25 +366,36 @@ class AttachmentWorker:
         processed = 0
         failed = 0
 
-        while self.running:
+        while self._shutdown.should_continue():
             jobs = self._claim_jobs(self.config.batch_size)
 
             if not jobs:
                 logger.debug(f"No jobs, sleeping {self.config.poll_interval}s")
-                time.sleep(self.config.poll_interval)
+                # Check shutdown more frequently than poll interval
+                for _ in range(self.config.poll_interval):
+                    if not self._shutdown.should_continue():
+                        break
+                    time.sleep(1)
                 continue
 
             logger.info(f"Processing batch of {len(jobs)} attachments")
 
             for job in jobs:
-                if self.process_job(job):
-                    processed += 1
-                else:
-                    failed += 1
+                if not self._shutdown.should_continue():
+                    logger.info("Shutdown requested, finishing current batch")
+                    break
+
+                with self._shutdown.track_work():
+                    if self.process_job(job):
+                        processed += 1
+                    else:
+                        failed += 1
 
                 if (processed + failed) % 50 == 0:
                     logger.info(f"Progress: {processed} processed, {failed} failed")
 
+        # Wait for any remaining in-flight work
+        self._shutdown.wait_for_completion(timeout=30.0)
         logger.info(
             f"Attachment worker stopped: {processed} processed, {failed} failed"
         )
@@ -419,8 +432,9 @@ class AttachmentWorker:
         return processed, failed
 
     def stop(self) -> None:
-        """Signal the worker to stop."""
-        self.running = False
+        """Signal the worker to stop gracefully."""
+        logger.info("Initiating graceful shutdown...")
+        self._shutdown.initiate()
 
 
 def main() -> None:
@@ -469,7 +483,6 @@ def main() -> None:
     worker = AttachmentWorker(config)
 
     def signal_handler(signum: int, frame: Any) -> None:
-        logger.info("Received shutdown signal")
         worker.stop()
 
     signal.signal(signal.SIGTERM, signal_handler)
