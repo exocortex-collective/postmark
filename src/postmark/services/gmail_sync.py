@@ -520,24 +520,28 @@ class GmailSync:
                         (json.dumps({"gmail_id": gmail_id}),),
                     )
 
-                    # Enqueue attachments for separate fetch (idempotent)
+                    # Enqueue attachments for separate fetch (idempotent, bulk insert)
                     if attachment_ids:
-                        for att_id in attachment_ids:
-                            cur.execute(
-                                """
-                                INSERT INTO queue (queue_name, payload)
-                                VALUES ('attachment', %s)
-                                ON CONFLICT (queue_name, (payload->>'gmail_id'), (payload->>'attachment_id'))
-                                    WHERE queue_name = 'attachment'
-                                      AND status IN ('pending', 'processing')
-                                DO NOTHING
-                                """,
-                                (
-                                    json.dumps(
-                                        {"gmail_id": gmail_id, "attachment_id": att_id}
-                                    ),
+                        attachment_jobs = [
+                            (
+                                "attachment",
+                                json.dumps(
+                                    {"gmail_id": gmail_id, "attachment_id": att_id}
                                 ),
                             )
+                            for att_id in attachment_ids
+                        ]
+                        execute_values(
+                            cur,
+                            """
+                            INSERT INTO queue (queue_name, payload) VALUES %s
+                            ON CONFLICT (queue_name, (payload->>'gmail_id'), (payload->>'attachment_id'))
+                                WHERE queue_name = 'attachment'
+                                  AND status IN ('pending', 'processing')
+                            DO NOTHING
+                            """,
+                            attachment_jobs,
+                        )
 
                 # Commit the entire message transaction
                 conn.commit()
