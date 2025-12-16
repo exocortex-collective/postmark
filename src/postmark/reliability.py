@@ -65,7 +65,10 @@ class CircuitBreaker:
     def _get_state_locked(self) -> CircuitState:
         """Get current state, transitioning from OPEN to HALF_OPEN if timeout passed."""
         if self._state == CircuitState.OPEN:
-            if time.time() - self._last_failure_time >= self.config.recovery_timeout:
+            if (
+                time.monotonic() - self._last_failure_time
+                >= self.config.recovery_timeout
+            ):
                 logger.info(
                     f"Circuit {self.name}: OPEN -> HALF_OPEN (recovery timeout)"
                 )
@@ -99,7 +102,7 @@ class CircuitBreaker:
         """Record a failed call."""
         with self._lock:
             self._failure_count += 1
-            self._last_failure_time = time.time()
+            self._last_failure_time = time.monotonic()
 
             if self._state == CircuitState.HALF_OPEN:
                 logger.warning(f"Circuit {self.name}: HALF_OPEN -> OPEN (failure)")
