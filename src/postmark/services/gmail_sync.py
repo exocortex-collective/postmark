@@ -272,16 +272,17 @@ class GmailSync:
                 -- Unique partial indexes for idempotent job processing
                 -- Prevents duplicate jobs in pending/processing state
                 -- This avoids duplicate work when visibility timeout expires
+                -- Note: Must include created_at for partitioned queue table
 
                 -- For parse/triage: dedup by gmail_id
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_dedup_gmail
-                    ON queue(queue_name, (payload->>'gmail_id'))
+                    ON queue(queue_name, (payload->>'gmail_id'), created_at)
                     WHERE queue_name IN ('parse', 'triage', 'actions')
                       AND status IN ('pending', 'processing');
 
                 -- For attachment: dedup by gmail_id + attachment_id
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_dedup_attachment
-                    ON queue(queue_name, (payload->>'gmail_id'), (payload->>'attachment_id'))
+                    ON queue(queue_name, (payload->>'gmail_id'), (payload->>'attachment_id'), created_at)
                     WHERE queue_name = 'attachment'
                       AND status IN ('pending', 'processing');
 
