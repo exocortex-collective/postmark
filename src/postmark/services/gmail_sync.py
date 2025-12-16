@@ -15,11 +15,13 @@ from typing import Any
 
 import psycopg2
 import schedule
+from cortex_utils.metrics import ERRORS, QUEUE_PROCESSED, start_metrics_server
 from google.cloud import pubsub_v1
 from google.cloud.pubsub_v1.types import FlowControl
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
+from prometheus_client import Counter
 from psycopg2.extras import execute_values
 from psycopg2.pool import ThreadedConnectionPool
 
@@ -31,6 +33,18 @@ from postmark.reliability import (
     GracefulShutdown,
     call_with_circuit_breaker,
     retry_with_backoff,
+)
+
+# Service-specific metrics
+PUBSUB_MESSAGES = Counter(
+    "gmail_sync_pubsub_messages_total",
+    "Total Pub/Sub messages processed",
+    ["status"],  # success, error
+)
+EMAILS_STORED = Counter(
+    "gmail_sync_emails_stored_total",
+    "Total emails stored in database",
+    ["type"],  # new, updated
 )
 
 logging.basicConfig(
@@ -547,6 +561,14 @@ class GmailSync:
                 conn.commit()
                 logger.info(f"Stored message {gmail_id}")
 
+                # Record metrics for stored email and enqueued jobs
+                EMAILS_STORED.labels(type="new").inc()
+                QUEUE_PROCESSED.labels(queue="parse", status="enqueued").inc()
+                if attachment_ids:
+                    QUEUE_PROCESSED.labels(queue="attachment", status="enqueued").inc(
+                        len(attachment_ids)
+                    )
+
             except psycopg2.Error as e:
                 conn.rollback()
                 logger.error(f"Failed to store message {gmail_id}, rolled back: {e}")
@@ -808,9 +830,12 @@ class GmailSync:
                 config=self._backoff_config,
                 retryable_exceptions=retryable_exceptions,
             )
+            PUBSUB_MESSAGES.labels(status="success").inc()
         except Exception as e:
             # All retries exhausted
             logger.exception(f"Error processing notification after retries: {e}")
+            PUBSUB_MESSAGES.labels(status="error").inc()
+            ERRORS.labels(service="gmail-sync", error_type="notification_failed").inc()
             message.nack()
 
     def _process_notification_inner(
@@ -1245,6 +1270,11 @@ def main() -> None:
         help="Backfill from date (YYYY-MM-DD) and exit",
     )
     args = parser.parse_args()
+
+    # Start metrics server
+    metrics_port = int(os.environ.get("METRICS_PORT", "8000"))
+    start_metrics_server(port=metrics_port)
+    logger.info(f"Metrics server started on port {metrics_port}")
 
     config = GmailSyncConfig.from_env()
     sync = GmailSync(config)

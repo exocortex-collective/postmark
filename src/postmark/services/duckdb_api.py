@@ -10,20 +10,59 @@ import logging
 import os
 import re
 import threading
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
 import duckdb
 import html2text
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query
+from cortex_utils.metrics import ERRORS, start_metrics_server
+from fastapi import FastAPI, HTTPException, Query, Request
+from prometheus_client import Counter, Gauge, Histogram
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
 
 DUCKDB_PATH = os.environ.get("DUCKDB_PATH", "/app/data/emails.duckdb")
 HOST = os.environ.get("DUCKDB_API_HOST", "0.0.0.0")
 PORT = int(os.environ.get("DUCKDB_API_PORT", "8081"))
+
+# HTTP metrics
+HTTP_REQUESTS = Counter(
+    "duckdb_api_http_requests_total",
+    "Total HTTP requests",
+    ["method", "endpoint", "status"],
+)
+HTTP_REQUEST_DURATION = Histogram(
+    "duckdb_api_http_request_duration_seconds",
+    "HTTP request latency",
+    ["method", "endpoint"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
+)
+
+# DuckDB metrics
+DUCKDB_QUERIES = Counter(
+    "duckdb_api_queries_total",
+    "Total DuckDB queries executed",
+    ["operation"],  # read, write
+)
+DUCKDB_QUERY_DURATION = Histogram(
+    "duckdb_api_query_duration_seconds",
+    "DuckDB query latency",
+    ["operation"],
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0),
+)
+DUCKDB_ROWS = Gauge(
+    "duckdb_api_rows_total",
+    "Total rows in email_bodies table",
+)
+DUCKDB_DATABASE_SIZE = Gauge(
+    "duckdb_api_database_size_bytes",
+    "Size of DuckDB database file",
+)
 
 # Configure html2text for clean markdown output
 _html2text = html2text.HTML2Text()
@@ -192,6 +231,24 @@ def get_connection() -> duckdb.DuckDBPyConnection:
     return _conn
 
 
+def _execute_query(
+    conn: duckdb.DuckDBPyConnection,
+    sql: str,
+    params: list[Any] | None = None,
+    operation: str = "read",
+) -> Any:
+    """Execute a query with timing metrics."""
+    start = time.time()
+    if params:
+        result = conn.execute(sql, params)
+    else:
+        result = conn.execute(sql)
+    duration = time.time() - start
+    DUCKDB_QUERIES.labels(operation=operation).inc()
+    DUCKDB_QUERY_DURATION.labels(operation=operation).observe(duration)
+    return result
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> Any:
     """Initialize DuckDB connection on startup."""
@@ -209,6 +266,42 @@ app = FastAPI(
     description="REST API for email body storage in DuckDB",
     lifespan=lifespan,
 )
+
+
+class MetricsMiddleware(BaseHTTPMiddleware):
+    """Middleware to record HTTP request metrics."""
+
+    async def dispatch(
+        self, request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
+        start_time = time.time()
+        response: Response = await call_next(request)
+        duration = time.time() - start_time
+
+        # Use route path template to avoid cardinality explosion with path params
+        route = request.scope.get("route")
+        endpoint = route.path if route else request.url.path
+
+        # Skip metrics endpoint to avoid recursion
+        if endpoint != "/metrics":
+            HTTP_REQUESTS.labels(
+                method=request.method,
+                endpoint=endpoint,
+                status=response.status_code,
+            ).inc()
+            HTTP_REQUEST_DURATION.labels(
+                method=request.method,
+                endpoint=endpoint,
+            ).observe(duration)
+
+            # Track errors
+            if response.status_code >= 500:
+                ERRORS.labels(service="duckdb-api", error_type="http_5xx").inc()
+
+        return response
+
+
+app.add_middleware(MetricsMiddleware)  # type: ignore[arg-type,call-arg]
 
 
 class BodyRequest(BaseModel):
@@ -265,8 +358,16 @@ def get_stats() -> StatsResponse:
     """Get email body count."""
     with _lock:
         conn = get_connection()
-        row = conn.execute("SELECT COUNT(*) FROM email_bodies").fetchone()
+        row = _execute_query(
+            conn, "SELECT COUNT(*) FROM email_bodies", operation="read"
+        ).fetchone()
     count = row[0] if row else 0
+
+    # Update gauges
+    DUCKDB_ROWS.set(count)
+    if os.path.exists(DUCKDB_PATH):
+        DUCKDB_DATABASE_SIZE.set(os.path.getsize(DUCKDB_PATH))
+
     return StatsResponse(count=count)
 
 
@@ -383,6 +484,7 @@ def get_bodies(
 @app.post("/body", response_model=StatusResponse, status_code=201)
 def store_body(body: BodyRequest) -> StatusResponse:
     """Store an email body."""
+    start = time.time()
     with _lock:
         conn = get_connection()
         conn.execute(
@@ -396,6 +498,9 @@ def store_body(body: BodyRequest) -> StatusResponse:
                 body.body_data,
             ),
         )
+    duration = time.time() - start
+    DUCKDB_QUERIES.labels(operation="write").inc()
+    DUCKDB_QUERY_DURATION.labels(operation="write").observe(duration)
 
     return StatusResponse(status="ok")
 
@@ -411,6 +516,11 @@ def checkpoint() -> StatusResponse:
 
 def main() -> None:
     """Run the DuckDB API server."""
+    # Start metrics server on separate port
+    metrics_port = int(os.environ.get("METRICS_PORT", "8003"))
+    start_metrics_server(port=metrics_port)
+    logger.info(f"Metrics server started on port {metrics_port}")
+
     uvicorn.run(
         "postmark.services.duckdb_api:app",
         host=HOST,

@@ -12,6 +12,12 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg2
+from cortex_utils.metrics import (
+    ERRORS,
+    PROCESSING_DURATION,
+    QUEUE_PROCESSED,
+    start_metrics_server,
+)
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from psycopg2.extras import Json, execute_values
@@ -364,6 +370,7 @@ class ParseWorker:
     def process_job(self, job: dict[str, Any]) -> bool:
         """Process a single parse job. Returns True on success."""
         gmail_id = job["payload"]["gmail_id"]
+        start_time = time.time()
 
         try:
             # Get raw email
@@ -390,6 +397,11 @@ class ParseWorker:
 
             # Mark job complete
             self._complete_job(job["id"])
+
+            # Record processing duration
+            PROCESSING_DURATION.labels(queue="parse", operation="process").observe(
+                time.time() - start_time
+            )
 
             return True
 
@@ -430,8 +442,13 @@ class ParseWorker:
                 with self._shutdown.track_work():
                     if self.process_job(job):
                         processed += 1
+                        QUEUE_PROCESSED.labels(queue="parse", status="success").inc()
                     else:
                         failed += 1
+                        QUEUE_PROCESSED.labels(queue="parse", status="error").inc()
+                        ERRORS.labels(
+                            service="parse-worker", error_type="job_failed"
+                        ).inc()
 
                 if (processed + failed) % 100 == 0:
                     logger.info(f"Progress: {processed} processed, {failed} failed")
@@ -461,8 +478,11 @@ class ParseWorker:
             for job in jobs:
                 if self.process_job(job):
                     processed += 1
+                    QUEUE_PROCESSED.labels(queue="parse", status="success").inc()
                 else:
                     failed += 1
+                    QUEUE_PROCESSED.labels(queue="parse", status="error").inc()
+                    ERRORS.labels(service="parse-worker", error_type="job_failed").inc()
 
                 if (processed + failed) % 100 == 0:
                     logger.info(f"Progress: {processed} processed, {failed} failed")
@@ -503,6 +523,11 @@ def main() -> None:
         logger.error(f"Missing required environment variables: {', '.join(missing)}")
         logger.error("See .env.template for required configuration")
         sys.exit(1)
+
+    # Start metrics server
+    metrics_port = int(os.environ.get("METRICS_PORT", "8001"))
+    start_metrics_server(port=metrics_port)
+    logger.info(f"Metrics server started on port {metrics_port}")
 
     config = Config(
         postgres_host=os.environ["POSTGRES_HOST"],

@@ -17,6 +17,12 @@ import boto3
 import psycopg2
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
+from cortex_utils.metrics import (
+    ERRORS,
+    PROCESSING_DURATION,
+    QUEUE_PROCESSED,
+    start_metrics_server,
+)
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
@@ -250,6 +256,7 @@ class AttachmentWorker:
         """Process a single attachment job. Returns True on success."""
         gmail_id = job["payload"]["gmail_id"]
         attachment_id = job["payload"]["attachment_id"]
+        start_time = time.time()
 
         try:
             # Check if already processed
@@ -346,6 +353,12 @@ class AttachmentWorker:
                 conn.commit()
 
             logger.info(f"Stored attachment: {s3_key} ({len(data)} bytes)")
+
+            # Record processing duration
+            PROCESSING_DURATION.labels(queue="attachment", operation="process").observe(
+                time.time() - start_time
+            )
+
             return True
 
         except HttpError as e:
@@ -388,8 +401,15 @@ class AttachmentWorker:
                 with self._shutdown.track_work():
                     if self.process_job(job):
                         processed += 1
+                        QUEUE_PROCESSED.labels(
+                            queue="attachment", status="success"
+                        ).inc()
                     else:
                         failed += 1
+                        QUEUE_PROCESSED.labels(queue="attachment", status="error").inc()
+                        ERRORS.labels(
+                            service="attachment-worker", error_type="job_failed"
+                        ).inc()
 
                 if (processed + failed) % 50 == 0:
                     logger.info(f"Progress: {processed} processed, {failed} failed")
@@ -420,8 +440,13 @@ class AttachmentWorker:
             for job in jobs:
                 if self.process_job(job):
                     processed += 1
+                    QUEUE_PROCESSED.labels(queue="attachment", status="success").inc()
                 else:
                     failed += 1
+                    QUEUE_PROCESSED.labels(queue="attachment", status="error").inc()
+                    ERRORS.labels(
+                        service="attachment-worker", error_type="job_failed"
+                    ).inc()
 
                 if (processed + failed) % 50 == 0:
                     logger.info(f"Progress: {processed} processed, {failed} failed")
@@ -465,6 +490,11 @@ def main() -> None:
     if missing:
         logger.error(f"Missing required environment variables: {', '.join(missing)}")
         sys.exit(1)
+
+    # Start metrics server
+    metrics_port = int(os.environ.get("METRICS_PORT", "8002"))
+    start_metrics_server(port=metrics_port)
+    logger.info(f"Metrics server started on port {metrics_port}")
 
     config = Config(
         postgres_host=os.environ["POSTGRES_HOST"],
