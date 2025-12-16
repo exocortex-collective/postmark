@@ -22,7 +22,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 from prometheus_client import Counter
-from psycopg2.extras import execute_values
+from psycopg2.extras import Json, execute_values
 from psycopg2.pool import ThreadedConnectionPool
 
 from postmark.reliability import (
@@ -46,6 +46,9 @@ EMAILS_STORED = Counter(
     "Total emails stored in database",
     ["type"],  # new, updated
 )
+
+# Queue priority for backfill jobs (lower = deprioritized vs real-time mail)
+BACKFILL_PRIORITY = -100
 
 logging.basicConfig(
     level=logging.INFO,
@@ -249,6 +252,7 @@ class GmailSync:
                     queue_name TEXT NOT NULL,
                     payload JSONB NOT NULL,
                     status TEXT NOT NULL DEFAULT 'pending',
+                    priority INT NOT NULL DEFAULT 0,
                     attempts INT DEFAULT 0,
                     max_attempts INT DEFAULT 3,
                     last_error TEXT,
@@ -260,8 +264,11 @@ class GmailSync:
                     )
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_queue_pending
-                    ON queue(queue_name, status, created_at)
+                -- Drop old index superseded by priority-aware index
+                DROP INDEX IF EXISTS idx_queue_pending;
+
+                CREATE INDEX IF NOT EXISTS idx_queue_pending_priority
+                    ON queue(queue_name, status, priority DESC, created_at)
                     WHERE status = 'pending';
 
                 -- Index for cancelling pending jobs by gmail_id (used in soft delete)
@@ -445,7 +452,7 @@ class GmailSync:
                 raise
 
     def store_raw_message(
-        self, gmail_id: str, already_exists: bool | None = None
+        self, gmail_id: str, already_exists: bool | None = None, priority: int = 0
     ) -> None:
         """Fetch and store raw message - no parsing, just slam it in.
 
@@ -461,6 +468,7 @@ class GmailSync:
         Args:
             gmail_id: The Gmail message ID.
             already_exists: If provided, skips the internal existence check.
+            priority: Queue priority for downstream jobs (default 0, negative for backfill).
         """
         if already_exists is None:
             already_exists = self._email_exists(gmail_id)
@@ -526,8 +534,8 @@ class GmailSync:
                     # Uses INSERT ... WHERE NOT EXISTS for partitioned table compatibility
                     cur.execute(
                         """
-                        INSERT INTO queue (queue_name, payload)
-                        SELECT 'parse', %s
+                        INSERT INTO queue (queue_name, payload, priority)
+                        SELECT 'parse', %s, %s
                         WHERE NOT EXISTS (
                             SELECT 1 FROM queue
                             WHERE queue_name = 'parse'
@@ -535,7 +543,7 @@ class GmailSync:
                               AND status IN ('pending', 'processing')
                         )
                         """,
-                        (json.dumps({"gmail_id": gmail_id}), gmail_id),
+                        (Json({"gmail_id": gmail_id}), priority, gmail_id),
                     )
 
                     # Enqueue attachments for separate fetch (idempotent)
@@ -543,8 +551,8 @@ class GmailSync:
                     for att_id in attachment_ids:
                         cur.execute(
                             """
-                            INSERT INTO queue (queue_name, payload)
-                            SELECT 'attachment', %s
+                            INSERT INTO queue (queue_name, payload, priority)
+                            SELECT 'attachment', %s, %s
                             WHERE NOT EXISTS (
                                 SELECT 1 FROM queue
                                 WHERE queue_name = 'attachment'
@@ -554,9 +562,8 @@ class GmailSync:
                             )
                             """,
                             (
-                                json.dumps(
-                                    {"gmail_id": gmail_id, "attachment_id": att_id}
-                                ),
+                                Json({"gmail_id": gmail_id, "attachment_id": att_id}),
+                                priority,
                                 gmail_id,
                                 att_id,
                             ),
@@ -698,7 +705,7 @@ class GmailSync:
                 continue
 
             logger.info(f"Label {event_type}: {label_name} on message {gmail_id}")
-            payload = json.dumps(
+            payload = Json(
                 {
                     "gmail_id": gmail_id,
                     "label": label_name,
@@ -1125,7 +1132,11 @@ class GmailSync:
                 already_exists = self._email_exists(gmail_id)
 
                 try:
-                    self.store_raw_message(gmail_id, already_exists=already_exists)
+                    self.store_raw_message(
+                        gmail_id,
+                        already_exists=already_exists,
+                        priority=BACKFILL_PRIORITY,
+                    )
                     if already_exists:
                         updated += 1
                     else:

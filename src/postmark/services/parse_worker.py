@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg2
+import psycopg2.errors
 from cortex_utils.metrics import (
     ERRORS,
     PROCESSING_DURATION,
@@ -235,18 +236,21 @@ class ParseWorker:
                 claimable AS (
                     SELECT id FROM queue
                     WHERE queue_name = 'parse' AND status = 'pending'
-                    ORDER BY created_at
+                    ORDER BY priority DESC, created_at
                     LIMIT %s
                     FOR UPDATE SKIP LOCKED
                 )
                 UPDATE queue
                 SET status = 'processing', claimed_at = NOW()
                 WHERE id IN (SELECT id FROM claimable)
-                RETURNING id, payload
+                RETURNING id, payload, priority
                 """,
                 (VISIBILITY_TIMEOUT_MINUTES, batch_size),
             )
-            jobs = [{"id": row[0], "payload": row[1]} for row in cur.fetchall()]
+            jobs = [
+                {"id": row[0], "payload": row[1], "priority": row[2]}
+                for row in cur.fetchall()
+            ]
             conn.commit()
         return jobs
 
@@ -350,22 +354,34 @@ class ParseWorker:
             )  # Truncate error to 1000 chars
             conn.commit()
 
-    def _enqueue_triage(self, gmail_id: str) -> None:
-        """Enqueue email for triage (idempotent - skips if already pending/processing)."""
+    def _enqueue_triage(self, gmail_id: str, priority: int = 0) -> None:
+        """Enqueue email for triage (idempotent - skips if already pending/processing).
+
+        Uses INSERT ... WHERE NOT EXISTS for partitioned table compatibility.
+        Handles race conditions gracefully by catching UniqueViolation.
+        """
         conn = self._get_pg_conn()
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO queue (queue_name, payload)
-                VALUES ('triage', %s)
-                ON CONFLICT (queue_name, (payload->>'gmail_id'))
-                    WHERE queue_name IN ('parse', 'triage', 'actions')
-                      AND status IN ('pending', 'processing')
-                DO NOTHING
-                """,
-                (Json({"gmail_id": gmail_id}),),
-            )
-            conn.commit()
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO queue (queue_name, payload, priority)
+                    SELECT 'triage', %s, %s
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM queue
+                        WHERE queue_name = 'triage'
+                          AND payload->>'gmail_id' = %s
+                          AND status IN ('pending', 'processing')
+                    )
+                    """,
+                    (Json({"gmail_id": gmail_id}), priority, gmail_id),
+                )
+                conn.commit()
+            except psycopg2.errors.UniqueViolation:
+                conn.rollback()
+                logger.debug(
+                    f"Triage job for {gmail_id} already exists (race condition). Ignoring."
+                )
 
     def process_job(self, job: dict[str, Any]) -> bool:
         """Process a single parse job. Returns True on success."""
@@ -393,7 +409,8 @@ class ParseWorker:
             self._store_parsed(parsed)
 
             # Enqueue for triage (classification and routing)
-            self._enqueue_triage(gmail_id)
+            # Propagate priority so backfill jobs stay deprioritized through pipeline
+            self._enqueue_triage(gmail_id, priority=job.get("priority", 0))
 
             # Mark job complete
             self._complete_job(job["id"])
