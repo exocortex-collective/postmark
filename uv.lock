@@ -322,7 +322,7 @@ wheels = [
 [[package]]
 name = "cortex-utils"
 version = "0.1.0"
-source = { git = "https://github.com/devonjones/cortex-utils.git#1ddf26b6a197f9ebec9298e7d2e002f2bd49c89c" }
+source = { git = "https://github.com/devonjones/cortex-utils.git?rev=1ddf26b6a197f9ebec9298e7d2e002f2bd49c89c#1ddf26b6a197f9ebec9298e7d2e002f2bd49c89c" }
 dependencies = [
     { name = "click" },
     { name = "docker" },
@@ -1410,7 +1410,7 @@ requires-dist = [
     { name = "boto3", specifier = ">=1.26.0" },
     { name = "charset-normalizer", specifier = ">=3.0.0" },
     { name = "click", specifier = ">=8.0.0" },
-    { name = "cortex-utils", git = "https://github.com/devonjones/cortex-utils.git" },
+    { name = "cortex-utils", git = "https://github.com/devonjones/cortex-utils.git?rev=1ddf26b6a197f9ebec9298e7d2e002f2bd49c89c" },
     { name = "duckdb", specifier = ">=0.9.0" },
     { name = "fastapi", specifier = ">=0.100.0" },
     { name = "google-api-python-client", specifier = ">=2.0.0" },

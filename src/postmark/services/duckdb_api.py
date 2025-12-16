@@ -21,7 +21,7 @@ from cortex_utils.metrics import ERRORS, start_metrics_server
 from fastapi import FastAPI, HTTPException, Query, Request
 from prometheus_client import Counter, Gauge, Histogram
 from pydantic import BaseModel
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
@@ -232,29 +232,21 @@ def get_connection() -> duckdb.DuckDBPyConnection:
 
 
 def _execute_query(
-    conn: duckdb.DuckDBPyConnection, sql: str, operation: str = "read"
+    conn: duckdb.DuckDBPyConnection,
+    sql: str,
+    params: list[Any] | None = None,
+    operation: str = "read",
 ) -> Any:
     """Execute a query with timing metrics."""
     start = time.time()
-    result = conn.execute(sql)
+    if params:
+        result = conn.execute(sql, params)
+    else:
+        result = conn.execute(sql)
     duration = time.time() - start
     DUCKDB_QUERIES.labels(operation=operation).inc()
     DUCKDB_QUERY_DURATION.labels(operation=operation).observe(duration)
     return result
-
-
-def _update_db_gauges() -> None:
-    """Update database size and row count gauges."""
-    # Update database file size
-    if os.path.exists(DUCKDB_PATH):
-        DUCKDB_DATABASE_SIZE.set(os.path.getsize(DUCKDB_PATH))
-
-    # Update row count (done during stats call)
-    with _lock:
-        conn = get_connection()
-        row = conn.execute("SELECT COUNT(*) FROM email_bodies").fetchone()
-        if row:
-            DUCKDB_ROWS.set(row[0])
 
 
 @asynccontextmanager
@@ -279,7 +271,9 @@ app = FastAPI(
 class MetricsMiddleware(BaseHTTPMiddleware):
     """Middleware to record HTTP request metrics."""
 
-    async def dispatch(self, request: Request, call_next: Any) -> Response:
+    async def dispatch(
+        self, request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
         start_time = time.time()
         response: Response = await call_next(request)
         duration = time.time() - start_time
@@ -363,7 +357,7 @@ def get_stats() -> StatsResponse:
     with _lock:
         conn = get_connection()
         row = _execute_query(
-            conn, "SELECT COUNT(*) FROM email_bodies", "read"
+            conn, "SELECT COUNT(*) FROM email_bodies", operation="read"
         ).fetchone()
     count = row[0] if row else 0
 
