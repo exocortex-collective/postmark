@@ -22,7 +22,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 from prometheus_client import Counter
-from psycopg2.extras import execute_values
+from psycopg2.extras import Json, execute_values
 from psycopg2.pool import ThreadedConnectionPool
 
 from postmark.reliability import (
@@ -543,7 +543,7 @@ class GmailSync:
                               AND status IN ('pending', 'processing')
                         )
                         """,
-                        (json.dumps({"gmail_id": gmail_id}), priority, gmail_id),
+                        (Json({"gmail_id": gmail_id}), priority, gmail_id),
                     )
 
                     # Enqueue attachments for separate fetch (idempotent)
@@ -562,9 +562,7 @@ class GmailSync:
                             )
                             """,
                             (
-                                json.dumps(
-                                    {"gmail_id": gmail_id, "attachment_id": att_id}
-                                ),
+                                Json({"gmail_id": gmail_id, "attachment_id": att_id}),
                                 priority,
                                 gmail_id,
                                 att_id,
@@ -707,7 +705,7 @@ class GmailSync:
                 continue
 
             logger.info(f"Label {event_type}: {label_name} on message {gmail_id}")
-            payload = json.dumps(
+            payload = Json(
                 {
                     "gmail_id": gmail_id,
                     "label": label_name,
