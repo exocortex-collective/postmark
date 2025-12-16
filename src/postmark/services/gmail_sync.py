@@ -264,6 +264,9 @@ class GmailSync:
                     )
                 );
 
+                -- Drop old index superseded by priority-aware index
+                DROP INDEX IF EXISTS idx_queue_pending;
+
                 CREATE INDEX IF NOT EXISTS idx_queue_pending_priority
                     ON queue(queue_name, status, priority DESC, created_at)
                     WHERE status = 'pending';
