@@ -17,6 +17,7 @@ from googleapiclient.discovery import build
 from psycopg2.extras import Json, execute_values
 
 from postmark.email.gmail_parser import ParsedEmail, parse_gmail_message
+from postmark.reliability import GracefulShutdown
 from postmark.storage.duckdb_client import get_body_data_from_api
 
 logging.basicConfig(
@@ -46,7 +47,7 @@ class Config:
 class ParseWorker:
     def __init__(self, config: Config):
         self.config = config
-        self.running = True
+        self._shutdown = GracefulShutdown()
         self._pg_conn: psycopg2.extensions.connection | None = None
         self._gmail: Any = None
         self._label_cache: set[str] = set()  # Known label IDs in gmail_labels
@@ -344,14 +345,18 @@ class ParseWorker:
             conn.commit()
 
     def _enqueue_triage(self, gmail_id: str) -> None:
-        """Enqueue email for triage (classification and routing)."""
+        """Enqueue email for triage (idempotent - skips if already pending/processing)."""
         conn = self._get_pg_conn()
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO queue (queue_name, payload)
                 VALUES ('triage', %s)
-            """,
+                ON CONFLICT (queue_name, (payload->>'gmail_id'))
+                    WHERE queue_name IN ('parse', 'triage', 'actions')
+                      AND status IN ('pending', 'processing')
+                DO NOTHING
+                """,
                 (Json({"gmail_id": gmail_id}),),
             )
             conn.commit()
@@ -394,7 +399,7 @@ class ParseWorker:
             return False
 
     def run(self) -> None:
-        """Main processing loop."""
+        """Main processing loop with graceful shutdown support."""
         self._ensure_schema()
         self._load_known_labels()
 
@@ -403,28 +408,36 @@ class ParseWorker:
         processed = 0
         failed = 0
 
-        while True:
-            if not self.running:
-                break
-
+        while self._shutdown.should_continue():
             jobs = self._claim_jobs(self.config.batch_size)
 
             if not jobs:
                 logger.debug(f"No jobs, sleeping {self.config.poll_interval}s")
-                time.sleep(self.config.poll_interval)
+                # Check shutdown more frequently than poll interval
+                for _ in range(self.config.poll_interval):
+                    if not self._shutdown.should_continue():
+                        break
+                    time.sleep(1)
                 continue
 
             logger.info(f"Processing batch of {len(jobs)} jobs")
 
             for job in jobs:
-                if self.process_job(job):
-                    processed += 1
-                else:
-                    failed += 1
+                if not self._shutdown.should_continue():
+                    logger.info("Shutdown requested, finishing current batch")
+                    break
+
+                with self._shutdown.track_work():
+                    if self.process_job(job):
+                        processed += 1
+                    else:
+                        failed += 1
 
                 if (processed + failed) % 100 == 0:
                     logger.info(f"Progress: {processed} processed, {failed} failed")
 
+        # Wait for any remaining in-flight work
+        self._shutdown.wait_for_completion(timeout=30.0)
         logger.info(f"Parse worker stopped: {processed} processed, {failed} failed")
 
     def run_once(self) -> tuple[int, int]:
@@ -458,8 +471,9 @@ class ParseWorker:
         return processed, failed
 
     def stop(self) -> None:
-        """Signal the worker to stop."""
-        self.running = False
+        """Signal the worker to stop gracefully."""
+        logger.info("Initiating graceful shutdown...")
+        self._shutdown.initiate()
 
 
 def main() -> None:
@@ -505,7 +519,6 @@ def main() -> None:
 
     # Handle signals for graceful shutdown
     def signal_handler(signum: int, frame: Any) -> None:
-        logger.info("Received shutdown signal")
         worker.stop()
 
     signal.signal(signal.SIGTERM, signal_handler)

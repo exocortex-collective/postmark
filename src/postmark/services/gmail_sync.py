@@ -23,6 +23,16 @@ from googleapiclient.errors import HttpError
 from psycopg2.extras import execute_values
 from psycopg2.pool import ThreadedConnectionPool
 
+from postmark.reliability import (
+    BackoffConfig,
+    CircuitBreaker,
+    CircuitBreakerConfig,
+    CircuitOpenError,
+    GracefulShutdown,
+    calculate_backoff_delay,
+    call_with_circuit_breaker,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -92,6 +102,28 @@ class GmailSync:
 
         # Thread-local storage for Gmail clients (httplib2 is not thread-safe)
         self._thread_local = threading.local()
+
+        # Reliability: Circuit breaker for DuckDB API
+        self._duckdb_circuit = CircuitBreaker(
+            "duckdb-api",
+            CircuitBreakerConfig(
+                failure_threshold=5,
+                recovery_timeout=30.0,
+                half_open_max_calls=1,
+            ),
+        )
+
+        # Reliability: Backoff config for Pub/Sub retries
+        self._backoff_config = BackoffConfig(
+            initial_delay=1.0,
+            max_delay=30.0,
+            multiplier=2.0,
+            jitter=0.1,
+            max_retries=3,
+        )
+
+        # Reliability: Graceful shutdown handler
+        self._shutdown = GracefulShutdown()
 
         # Initialize clients
         self._init_gmail_token_data()
@@ -223,6 +255,22 @@ class GmailSync:
                     ON queue((payload->>'gmail_id'))
                     WHERE status = 'pending';
 
+                -- Unique partial indexes for idempotent job processing
+                -- Prevents duplicate jobs in pending/processing state
+                -- This avoids duplicate work when visibility timeout expires
+
+                -- For parse/triage: dedup by gmail_id
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_dedup_gmail
+                    ON queue(queue_name, (payload->>'gmail_id'))
+                    WHERE queue_name IN ('parse', 'triage', 'actions')
+                      AND status IN ('pending', 'processing');
+
+                -- For attachment: dedup by gmail_id + attachment_id
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_dedup_attachment
+                    ON queue(queue_name, (payload->>'gmail_id'), (payload->>'attachment_id'))
+                    WHERE queue_name = 'attachment'
+                      AND status IN ('pending', 'processing');
+
                 -- Gmail labels cache (id -> name mapping)
                 -- name_parts stores hierarchical names as arrays for easy querying
                 -- e.g. "Cortex/Todo" -> ['Cortex', 'Todo']
@@ -247,33 +295,44 @@ class GmailSync:
     def _store_body_via_api(
         self, gmail_id: str, parts: list[Any] | None, body_data: str | None
     ) -> None:
-        """Store email body via DuckDB API.
+        """Store email body via DuckDB API with circuit breaker protection.
 
         Raises on failure to allow caller to nack Pub/Sub message for retry.
+        Circuit breaker prevents cascade failures when DuckDB API is down.
         """
-        data = json.dumps(
-            {"gmail_id": gmail_id, "parts": parts, "body_data": body_data}
-        ).encode()
 
-        req = urllib.request.Request(
-            f"{self.config.duckdb_api_url}/body",
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
+        def do_request() -> None:
+            data = json.dumps(
+                {"gmail_id": gmail_id, "parts": parts, "body_data": body_data}
+            ).encode()
+
+            req = urllib.request.Request(
+                f"{self.config.duckdb_api_url}/body",
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    if resp.status != 201:
+                        error_body = resp.read().decode(errors="ignore")
+                        logger.error(
+                            f"DuckDB API returned {resp.status} for {gmail_id}: {error_body}"
+                        )
+                        raise RuntimeError(
+                            f"DuckDB API returned {resp.status} for {gmail_id}"
+                        )
+            except (urllib.error.URLError, TimeoutError) as e:
+                logger.error(f"Failed to store body for {gmail_id}: {e}")
+                raise
 
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                if resp.status != 201:
-                    error_body = resp.read().decode(errors="ignore")
-                    logger.error(
-                        f"DuckDB API returned {resp.status} for {gmail_id}: {error_body}"
-                    )
-                    raise RuntimeError(
-                        f"DuckDB API returned {resp.status} for {gmail_id}"
-                    )
-        except (urllib.error.URLError, TimeoutError) as e:
-            logger.error(f"Failed to store body for {gmail_id}: {e}")
+            call_with_circuit_breaker(self._duckdb_circuit, do_request)
+        except CircuitOpenError:
+            logger.warning(
+                f"DuckDB API circuit open, skipping body storage for {gmail_id}"
+            )
             raise
 
     def _get_last_history_id(self, email_address: str) -> str | None:
@@ -448,31 +507,37 @@ class GmailSync:
                         ),
                     )
 
-                    # Enqueue for parsing
+                    # Enqueue for parsing (idempotent - skips if already pending/processing)
                     cur.execute(
                         """
                         INSERT INTO queue (queue_name, payload)
                         VALUES ('parse', %s)
+                        ON CONFLICT (queue_name, (payload->>'gmail_id'))
+                            WHERE queue_name IN ('parse', 'triage', 'actions')
+                              AND status IN ('pending', 'processing')
+                        DO NOTHING
                         """,
                         (json.dumps({"gmail_id": gmail_id}),),
                     )
 
-                    # Enqueue attachments for separate fetch
+                    # Enqueue attachments for separate fetch (idempotent)
                     if attachment_ids:
-                        attachment_jobs = [
-                            (
-                                "attachment",
-                                json.dumps(
-                                    {"gmail_id": gmail_id, "attachment_id": att_id}
+                        for att_id in attachment_ids:
+                            cur.execute(
+                                """
+                                INSERT INTO queue (queue_name, payload)
+                                VALUES ('attachment', %s)
+                                ON CONFLICT (queue_name, (payload->>'gmail_id'), (payload->>'attachment_id'))
+                                    WHERE queue_name = 'attachment'
+                                      AND status IN ('pending', 'processing')
+                                DO NOTHING
+                                """,
+                                (
+                                    json.dumps(
+                                        {"gmail_id": gmail_id, "attachment_id": att_id}
+                                    ),
                                 ),
                             )
-                            for att_id in attachment_ids
-                        ]
-                        execute_values(
-                            cur,
-                            "INSERT INTO queue (queue_name, payload) VALUES %s",
-                            attachment_jobs,
-                        )
 
                 # Commit the entire message transaction
                 conn.commit()
@@ -711,114 +776,149 @@ class GmailSync:
     def process_notification(
         self, message: pubsub_v1.subscriber.message.Message
     ) -> None:
-        """Handle a single Pub/Sub notification."""
-        try:
-            data = json.loads(message.data.decode("utf-8"))
-            email_address = data["emailAddress"]
-            new_history_id = data["historyId"]
+        """Handle a single Pub/Sub notification with retry and backoff.
 
-            logger.info(f"Notification for {email_address}, historyId={new_history_id}")
+        On transient failures, retries with exponential backoff before nacking.
+        This prevents thundering herd on transient failures.
+        """
+        # Track in-flight work for graceful shutdown
+        with self._shutdown.track_work():
+            self._process_notification_with_retry(message)
 
-            last_history_id = self._get_last_history_id(email_address)
-
-            if last_history_id is None:
-                # First sync - just record the history ID, don't backfill
-                logger.info(
-                    f"First notification for {email_address}, recording baseline"
-                )
-                self._set_last_history_id(email_address, new_history_id)
-                message.ack()
-                return
-
-            # Fetch history
-            try:
-                history_response = (
-                    self.gmail.users()
-                    .history()
-                    .list(
-                        userId="me",
-                        startHistoryId=last_history_id,
-                        historyTypes=[
-                            "messageAdded",
-                            "messageDeleted",
-                            "labelAdded",
-                            "labelRemoved",
-                        ],
-                    )
-                    .execute()
-                )
-            except HttpError as e:
-                if e.resp.status == 404:
-                    # History too old, record new baseline
-                    logger.warning(
-                        f"History {last_history_id} too old, resetting to {new_history_id}"
-                    )
-                    self._set_last_history_id(email_address, new_history_id)
-                    message.ack()
-                    return
-                raise
-
-            # Process history records
-            # IMPORTANT: History ID checkpoint safety
-            # - Each message operation commits independently (for isolation)
-            # - If ANY operation fails, exception propagates and we nack
-            # - History ID only updates AFTER all records are processed
-            # - On retry, idempotency (ON CONFLICT DO NOTHING) prevents duplicates
-            # - This ensures no data loss on crash mid-batch
-            messages_added = 0
-            messages_deleted = 0
-            label_events = 0
-
-            for record in history_response.get("history", []):
-                # New messages
-                for msg_added in record.get("messagesAdded", []):
-                    msg_id = msg_added["message"]["id"]
-                    self.store_raw_message(msg_id)
-                    messages_added += 1
-
-                # Deleted messages - soft delete and cancel pending jobs
-                for msg_deleted in record.get("messagesDeleted", []):
-                    msg_id = msg_deleted["message"]["id"]
-                    self._process_message_deleted(msg_id)
-                    messages_deleted += 1
-
-                # Label additions - enqueue Cortex/* labels for actions service
-                for label_added in record.get("labelsAdded", []):
-                    msg_id = label_added["message"]["id"]
-                    label_ids = label_added.get("labelIds", [])
-                    self._process_label_event(msg_id, label_ids, "added")
-                    label_events += 1
-
-                # Label removals - track for corrections
-                for label_removed in record.get("labelsRemoved", []):
-                    msg_id = label_removed["message"]["id"]
-                    label_ids = label_removed.get("labelIds", [])
-                    self._process_label_event(msg_id, label_ids, "removed")
-                    label_events += 1
-
-            # Update history ID checkpoint ONLY after all records processed successfully
-            # This is the critical safety point - if we crash before here, we'll
-            # reprocess from the old history_id (safe due to idempotency)
-            new_id = history_response.get("historyId", new_history_id)
-            self._set_last_history_id(email_address, new_id)
-
-            if messages_added or messages_deleted or label_events:
-                logger.info(
-                    f"Processed history batch: +{messages_added} msgs, "
-                    f"-{messages_deleted} deleted, {label_events} label events"
-                )
-
-            message.ack()
-
-        except (
+    def _process_notification_with_retry(
+        self, message: pubsub_v1.subscriber.message.Message
+    ) -> None:
+        """Internal notification processor with retry logic."""
+        retryable_exceptions = (
             HttpError,
             psycopg2.Error,
             urllib.error.URLError,
             TimeoutError,
             RuntimeError,
-        ) as e:
-            logger.exception(f"Error processing notification: {e}")
-            message.nack()
+            CircuitOpenError,
+        )
+
+        last_exception: Exception | None = None
+
+        for attempt in range(self._backoff_config.max_retries + 1):
+            try:
+                self._process_notification_inner(message)
+                return  # Success
+            except retryable_exceptions as e:
+                last_exception = e
+                if attempt < self._backoff_config.max_retries:
+                    delay = calculate_backoff_delay(attempt, self._backoff_config)
+                    logger.warning(
+                        f"Notification processing attempt {attempt + 1}/"
+                        f"{self._backoff_config.max_retries + 1} failed: {e}. "
+                        f"Retrying in {delay:.2f}s"
+                    )
+                    time.sleep(delay)
+
+        # All retries exhausted
+        logger.exception(
+            f"Error processing notification after retries: {last_exception}"
+        )
+        message.nack()
+
+    def _process_notification_inner(
+        self, message: pubsub_v1.subscriber.message.Message
+    ) -> None:
+        """Core notification processing logic."""
+        data = json.loads(message.data.decode("utf-8"))
+        email_address = data["emailAddress"]
+        new_history_id = data["historyId"]
+
+        logger.info(f"Notification for {email_address}, historyId={new_history_id}")
+
+        last_history_id = self._get_last_history_id(email_address)
+
+        if last_history_id is None:
+            # First sync - just record the history ID, don't backfill
+            logger.info(f"First notification for {email_address}, recording baseline")
+            self._set_last_history_id(email_address, new_history_id)
+            message.ack()
+            return
+
+        # Fetch history
+        try:
+            history_response = (
+                self.gmail.users()
+                .history()
+                .list(
+                    userId="me",
+                    startHistoryId=last_history_id,
+                    historyTypes=[
+                        "messageAdded",
+                        "messageDeleted",
+                        "labelAdded",
+                        "labelRemoved",
+                    ],
+                )
+                .execute()
+            )
+        except HttpError as e:
+            if e.resp.status == 404:
+                # History too old, record new baseline
+                logger.warning(
+                    f"History {last_history_id} too old, resetting to {new_history_id}"
+                )
+                self._set_last_history_id(email_address, new_history_id)
+                message.ack()
+                return
+            raise
+
+        # Process history records
+        # IMPORTANT: History ID checkpoint safety
+        # - Each message operation commits independently (for isolation)
+        # - If ANY operation fails, exception propagates and we nack
+        # - History ID only updates AFTER all records are processed
+        # - On retry, idempotency (ON CONFLICT DO NOTHING) prevents duplicates
+        # - This ensures no data loss on crash mid-batch
+        messages_added = 0
+        messages_deleted = 0
+        label_events = 0
+
+        for record in history_response.get("history", []):
+            # New messages
+            for msg_added in record.get("messagesAdded", []):
+                msg_id = msg_added["message"]["id"]
+                self.store_raw_message(msg_id)
+                messages_added += 1
+
+            # Deleted messages - soft delete and cancel pending jobs
+            for msg_deleted in record.get("messagesDeleted", []):
+                msg_id = msg_deleted["message"]["id"]
+                self._process_message_deleted(msg_id)
+                messages_deleted += 1
+
+            # Label additions - enqueue Cortex/* labels for actions service
+            for label_added in record.get("labelsAdded", []):
+                msg_id = label_added["message"]["id"]
+                label_ids = label_added.get("labelIds", [])
+                self._process_label_event(msg_id, label_ids, "added")
+                label_events += 1
+
+            # Label removals - track for corrections
+            for label_removed in record.get("labelsRemoved", []):
+                msg_id = label_removed["message"]["id"]
+                label_ids = label_removed.get("labelIds", [])
+                self._process_label_event(msg_id, label_ids, "removed")
+                label_events += 1
+
+        # Update history ID checkpoint ONLY after all records processed successfully
+        # This is the critical safety point - if we crash before here, we'll
+        # reprocess from the old history_id (safe due to idempotency)
+        new_id = history_response.get("historyId", new_history_id)
+        self._set_last_history_id(email_address, new_id)
+
+        if messages_added or messages_deleted or label_events:
+            logger.info(
+                f"Processed history batch: +{messages_added} msgs, "
+                f"-{messages_deleted} deleted, {label_events} label events"
+            )
+
+        message.ack()
 
     def _get_current_user_email(self) -> str:
         """Get the email address of the authenticated user (cached, thread-safe)."""
@@ -1106,7 +1206,18 @@ class GmailSync:
         try:
             streaming_pull_future.result()
         except KeyboardInterrupt:
+            logger.info("Shutdown signal received, initiating graceful shutdown...")
+            self._shutdown.initiate()
             streaming_pull_future.cancel()
+
+            # Wait for in-flight notifications to complete
+            if self._shutdown.wait_for_completion(timeout=30.0):
+                logger.info("Graceful shutdown complete - all work finished")
+            else:
+                logger.warning(
+                    "Graceful shutdown timeout - some work may be incomplete"
+                )
+
             streaming_pull_future.result()
             logger.info("Shutdown complete")
 
