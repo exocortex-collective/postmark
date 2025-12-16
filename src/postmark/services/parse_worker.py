@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg2
+import psycopg2.errors
 from cortex_utils.metrics import (
     ERRORS,
     PROCESSING_DURATION,
@@ -357,23 +358,30 @@ class ParseWorker:
         """Enqueue email for triage (idempotent - skips if already pending/processing).
 
         Uses INSERT ... WHERE NOT EXISTS for partitioned table compatibility.
+        Handles race conditions gracefully by catching UniqueViolation.
         """
         conn = self._get_pg_conn()
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO queue (queue_name, payload, priority)
-                SELECT 'triage', %s, %s
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM queue
-                    WHERE queue_name = 'triage'
-                      AND payload->>'gmail_id' = %s
-                      AND status IN ('pending', 'processing')
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO queue (queue_name, payload, priority)
+                    SELECT 'triage', %s, %s
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM queue
+                        WHERE queue_name = 'triage'
+                          AND payload->>'gmail_id' = %s
+                          AND status IN ('pending', 'processing')
+                    )
+                    """,
+                    (Json({"gmail_id": gmail_id}), priority, gmail_id),
                 )
-                """,
-                (Json({"gmail_id": gmail_id}), priority, gmail_id),
-            )
-            conn.commit()
+                conn.commit()
+            except psycopg2.errors.UniqueViolation:
+                conn.rollback()
+                logger.debug(
+                    f"Triage job for {gmail_id} already exists (race condition). Ignoring."
+                )
 
     def process_job(self, job: dict[str, Any]) -> bool:
         """Process a single parse job. Returns True on success."""
