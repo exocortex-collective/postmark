@@ -126,6 +126,10 @@ ignore_missing_imports = true
 module = "psycopg2.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = "cortex_utils.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
