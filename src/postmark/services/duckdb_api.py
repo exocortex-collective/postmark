@@ -35,15 +35,19 @@ def _get_or_create_metric(
     metric_class: type,
     name: str,
     description: str,
-    labelnames: list[str] = [],
+    labelnames: list[str] | None = None,
     **kwargs: Any,
 ) -> Any:
     """Get existing metric or create new one (handles uvicorn reload)."""
-    # Check if metric already exists in registry
-    for collector in REGISTRY._names_to_collectors.values():
-        if hasattr(collector, "_name") and collector._name == name:
-            return collector
-    return metric_class(name, description, labelnames, **kwargs)
+    if labelnames is None:
+        labelnames = []
+    try:
+        return metric_class(name, description, labelnames, **kwargs)
+    except ValueError:
+        # Metric already registered - get it from registry
+        # The registry stores metrics under their base name (without _total suffix)
+        base_name = name.removesuffix("_total")
+        return REGISTRY._names_to_collectors.get(base_name)
 
 
 # HTTP metrics (guarded against duplicate registration)
