@@ -175,11 +175,14 @@ class AttachmentWorker:
                 UPDATE queue
                 SET status = 'processing', claimed_at = NOW()
                 WHERE id IN (SELECT id FROM claimable)
-                RETURNING id, payload
+                RETURNING id, payload, priority
                 """,
                 (VISIBILITY_TIMEOUT_MINUTES, batch_size),
             )
-            jobs = [{"id": row[0], "payload": row[1]} for row in cur.fetchall()]
+            jobs = [
+                {"id": row[0], "payload": row[1], "priority": row[2]}
+                for row in cur.fetchall()
+            ]
             conn.commit()
         return jobs
 
