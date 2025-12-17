@@ -46,6 +46,7 @@ def _get_or_create_metric(
     except ValueError:
         # Metric already registered - get it from registry
         # Try full name first, then without _total suffix (for Counters)
+        # Note: Uses private _names_to_collectors as no public API exists for this
         return REGISTRY._names_to_collectors.get(
             name
         ) or REGISTRY._names_to_collectors.get(name.removesuffix("_total"))
