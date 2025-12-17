@@ -45,9 +45,11 @@ def _get_or_create_metric(
         return metric_class(name, description, labelnames, **kwargs)
     except ValueError:
         # Metric already registered - get it from registry
-        # The registry stores metrics under their base name (without _total suffix)
-        base_name = name.removesuffix("_total")
-        return REGISTRY._names_to_collectors.get(base_name)
+        # Try full name first, then without _total suffix (for Counters)
+        # Note: Uses private _names_to_collectors as no public API exists for this
+        return REGISTRY._names_to_collectors.get(
+            name
+        ) or REGISTRY._names_to_collectors.get(name.removesuffix("_total"))
 
 
 # HTTP metrics (guarded against duplicate registration)
@@ -389,10 +391,21 @@ def get_stats() -> StatsResponse:
         ).fetchone()
     count = row[0] if row else 0
 
-    # Update gauges
-    DUCKDB_ROWS.set(count)
-    if os.path.exists(DUCKDB_PATH):
-        DUCKDB_DATABASE_SIZE.set(os.path.getsize(DUCKDB_PATH))
+    # Update gauges (defensive - may be None in edge cases)
+    if DUCKDB_ROWS is not None:
+        DUCKDB_ROWS.set(count)
+    else:
+        logger.warning("DUCKDB_ROWS metric not available, skipping update.")
+    if DUCKDB_DATABASE_SIZE is not None:
+        try:
+            db_size = os.path.getsize(DUCKDB_PATH)
+        except OSError as e:
+            db_size = 0
+            if not isinstance(e, FileNotFoundError):
+                logger.warning(f"Error getting size of {DUCKDB_PATH}: {e}")
+        DUCKDB_DATABASE_SIZE.set(db_size)
+    else:
+        logger.warning("DUCKDB_DATABASE_SIZE metric not available, skipping update.")
 
     return StatsResponse(count=count)
 
