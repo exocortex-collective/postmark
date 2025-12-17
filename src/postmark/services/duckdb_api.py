@@ -399,11 +399,10 @@ def get_stats() -> StatsResponse:
     if DUCKDB_DATABASE_SIZE is not None:
         try:
             db_size = os.path.getsize(DUCKDB_PATH)
-        except FileNotFoundError:
-            db_size = 0
         except OSError as e:
-            logger.warning(f"Error getting size of {DUCKDB_PATH}: {e}")
             db_size = 0
+            if not isinstance(e, FileNotFoundError):
+                logger.warning(f"Error getting size of {DUCKDB_PATH}: {e}")
         DUCKDB_DATABASE_SIZE.set(db_size)
     else:
         logger.warning("DUCKDB_DATABASE_SIZE metric not available, skipping update.")
