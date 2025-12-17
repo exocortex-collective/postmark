@@ -45,9 +45,12 @@ def _get_or_create_metric(
         return metric_class(name, description, labelnames, **kwargs)
     except ValueError:
         # Metric already registered - get it from registry
-        # The registry stores metrics under their base name (without _total suffix)
-        base_name = name.removesuffix("_total")
-        return REGISTRY._names_to_collectors.get(base_name)
+        # Try full name first, then without _total suffix (for Counters)
+        metric = REGISTRY._names_to_collectors.get(name)
+        if metric is None:
+            base_name = name.removesuffix("_total")
+            metric = REGISTRY._names_to_collectors.get(base_name)
+        return metric
 
 
 # HTTP metrics (guarded against duplicate registration)
@@ -389,9 +392,10 @@ def get_stats() -> StatsResponse:
         ).fetchone()
     count = row[0] if row else 0
 
-    # Update gauges
-    DUCKDB_ROWS.set(count)
-    if os.path.exists(DUCKDB_PATH):
+    # Update gauges (defensive - may be None in edge cases)
+    if DUCKDB_ROWS is not None:
+        DUCKDB_ROWS.set(count)
+    if DUCKDB_DATABASE_SIZE is not None and os.path.exists(DUCKDB_PATH):
         DUCKDB_DATABASE_SIZE.set(os.path.getsize(DUCKDB_PATH))
 
     return StatsResponse(count=count)
