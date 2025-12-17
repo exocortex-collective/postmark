@@ -13,7 +13,7 @@ dependencies = [
     "boto3>=1.26.0",
     "python-Levenshtein>=0.20.0",
     "prometheus-client>=0.16.0",
-    "cortex-utils @ git+https://github.com/devonjones/cortex-utils.git@1ddf26b6a197f9ebec9298e7d2e002f2bd49c89c",
+    "cortex-utils @ git+https://github.com/devonjones/cortex-utils.git@7c3d796a1252e719217151b75f255f74a29a9fa3",
     "pydantic>=2.0.0",
     "charset-normalizer>=3.0.0",
     "beautifulsoup4>=4.12.0",

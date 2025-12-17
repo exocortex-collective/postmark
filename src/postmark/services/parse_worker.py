@@ -14,6 +14,7 @@ from typing import Any
 import psycopg2
 import psycopg2.errors
 from cortex_utils.metrics import (
+    EMAILS_PARSED,
     ERRORS,
     PROCESSING_DURATION,
     QUEUE_PROCESSED,
@@ -407,6 +408,7 @@ class ParseWorker:
 
             # Store parsed result
             self._store_parsed(parsed)
+            EMAILS_PARSED.inc()
 
             # Enqueue for triage (classification and routing)
             # Propagate priority so backfill jobs stay deprioritized through pipeline
