@@ -46,10 +46,9 @@ def _get_or_create_metric(
     except ValueError:
         # Metric already registered - get it from registry
         # Try full name first, then without _total suffix (for Counters)
-        metric = REGISTRY._names_to_collectors.get(name)
-        if metric is None:
-            metric = REGISTRY._names_to_collectors.get(name.removesuffix("_total"))
-        return metric
+        return REGISTRY._names_to_collectors.get(
+            name
+        ) or REGISTRY._names_to_collectors.get(name.removesuffix("_total"))
 
 
 # HTTP metrics (guarded against duplicate registration)
