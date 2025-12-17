@@ -882,17 +882,21 @@ class GmailSync:
             )
 
             page_count += 1
-            final_history_id = response.get("historyId")
+            page_history_id = response.get("historyId")
+
+            # Log pagination early so we know if failure happens mid-batch
+            if page_count == 2:
+                logger.info("History API returning multiple pages, fetching all...")
 
             for record in response.get("history", []):
-                yield record, final_history_id
+                yield record, page_history_id
 
             page_token = response.get("nextPageToken")
             if not page_token:
                 break
 
         if page_count > 1:
-            logger.info(f"History fetch required {page_count} pages")
+            logger.info(f"History fetch completed: {page_count} pages")
 
     def _process_history_record(self, record: dict[str, Any]) -> tuple[int, int, int]:
         """Process a single history record.
