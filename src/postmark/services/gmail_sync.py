@@ -15,7 +15,12 @@ from typing import Any
 
 import psycopg2
 import schedule
-from cortex_utils.metrics import ERRORS, QUEUE_PROCESSED, start_metrics_server
+from cortex_utils.metrics import (
+    EMAILS_SYNCED,
+    ERRORS,
+    QUEUE_PROCESSED,
+    start_metrics_server,
+)
 from google.cloud import pubsub_v1
 from google.cloud.pubsub_v1.types import FlowControl
 from google.oauth2.credentials import Credentials
@@ -40,11 +45,6 @@ PUBSUB_MESSAGES = Counter(
     "gmail_sync_pubsub_messages_total",
     "Total Pub/Sub messages processed",
     ["status"],  # success, error
-)
-EMAILS_STORED = Counter(
-    "gmail_sync_emails_stored_total",
-    "Total emails stored in database",
-    ["type"],  # new, updated
 )
 
 # Queue priority for backfill jobs (lower = deprioritized vs real-time mail)
@@ -574,7 +574,7 @@ class GmailSync:
                 logger.info(f"Stored message {gmail_id}")
 
                 # Record metrics for stored email and enqueued jobs
-                EMAILS_STORED.labels(type="new").inc()
+                EMAILS_SYNCED.labels(type="new").inc()
                 QUEUE_PROCESSED.labels(queue="parse", status="enqueued").inc()
                 if attachment_ids:
                     QUEUE_PROCESSED.labels(queue="attachment", status="enqueued").inc(
