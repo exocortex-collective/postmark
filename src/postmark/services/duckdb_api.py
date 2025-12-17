@@ -393,8 +393,13 @@ def get_stats() -> StatsResponse:
     # Update gauges (defensive - may be None in edge cases)
     if DUCKDB_ROWS is not None:
         DUCKDB_ROWS.set(count)
-    if DUCKDB_DATABASE_SIZE is not None and os.path.exists(DUCKDB_PATH):
-        DUCKDB_DATABASE_SIZE.set(os.path.getsize(DUCKDB_PATH))
+    else:
+        logger.warning("DUCKDB_ROWS metric not available, skipping update.")
+    if DUCKDB_DATABASE_SIZE is not None:
+        if os.path.exists(DUCKDB_PATH):
+            DUCKDB_DATABASE_SIZE.set(os.path.getsize(DUCKDB_PATH))
+    else:
+        logger.warning("DUCKDB_DATABASE_SIZE metric not available, skipping update.")
 
     return StatsResponse(count=count)
 
