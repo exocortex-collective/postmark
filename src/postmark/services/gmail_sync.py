@@ -850,10 +850,91 @@ class GmailSync:
             ERRORS.labels(service="gmail-sync", error_type="notification_failed").inc()
             message.nack()
 
+    def _fetch_history_pages(
+        self, start_history_id: str
+    ) -> Iterator[tuple[dict[str, Any], str | None]]:
+        """Fetch all history pages starting from a history ID.
+
+        Yields (history_record, final_history_id) tuples for each record.
+        The final_history_id is updated as pages are fetched.
+
+        Raises HttpError on API errors (including 404 for expired history).
+        """
+        page_token: str | None = None
+        page_count = 0
+
+        while True:
+            response = (
+                self.gmail.users()
+                .history()
+                .list(
+                    userId="me",
+                    startHistoryId=start_history_id,
+                    historyTypes=[
+                        "messageAdded",
+                        "messageDeleted",
+                        "labelAdded",
+                        "labelRemoved",
+                    ],
+                    pageToken=page_token,
+                )
+                .execute()
+            )
+
+            page_count += 1
+            page_history_id = response.get("historyId")
+
+            # Log pagination early so we know if failure happens mid-batch
+            if page_count == 2:
+                logger.info("History API returning multiple pages, fetching all...")
+
+            for record in response.get("history", []):
+                yield record, page_history_id
+
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+
+        if page_count > 1:
+            logger.info(f"History fetch completed: {page_count} pages")
+
+    def _process_history_record(self, record: dict[str, Any]) -> tuple[int, int, int]:
+        """Process a single history record.
+
+        Returns (messages_added, messages_deleted, label_events) counts.
+        """
+        messages_added = 0
+        messages_deleted = 0
+        label_events = 0
+
+        for msg_added in record.get("messagesAdded", []):
+            msg_id = msg_added["message"]["id"]
+            self.store_raw_message(msg_id)
+            messages_added += 1
+
+        for msg_deleted in record.get("messagesDeleted", []):
+            msg_id = msg_deleted["message"]["id"]
+            self._process_message_deleted(msg_id)
+            messages_deleted += 1
+
+        for label_added in record.get("labelsAdded", []):
+            msg_id = label_added["message"]["id"]
+            label_ids = label_added.get("labelIds", [])
+            self._process_label_event(msg_id, label_ids, "added")
+            label_events += 1
+
+        for label_removed in record.get("labelsRemoved", []):
+            msg_id = label_removed["message"]["id"]
+            label_ids = label_removed.get("labelIds", [])
+            self._process_label_event(msg_id, label_ids, "removed")
+            label_events += 1
+
+        return messages_added, messages_deleted, label_events
+
     def _process_notification_inner(
         self, message: pubsub_v1.subscriber.message.Message
     ) -> None:
-        """Core notification processing logic."""
+        """Process a Pub/Sub notification for Gmail changes."""
         data = json.loads(message.data.decode("utf-8"))
         email_address = data["emailAddress"]
         new_history_id = data["historyId"]
@@ -863,32 +944,28 @@ class GmailSync:
         last_history_id = self._get_last_history_id(email_address)
 
         if last_history_id is None:
-            # First sync - just record the history ID, don't backfill
             logger.info(f"First notification for {email_address}, recording baseline")
             self._set_last_history_id(email_address, new_history_id)
             message.ack()
             return
 
-        # Fetch history
+        # Process all history records across pages
+        # If any operation fails, exception propagates and we nack
+        # On retry, idempotency (ON CONFLICT DO NOTHING) prevents duplicates
+        messages_added = 0
+        messages_deleted = 0
+        label_events = 0
+        final_history_id: str | None = None
+
         try:
-            history_response = (
-                self.gmail.users()
-                .history()
-                .list(
-                    userId="me",
-                    startHistoryId=last_history_id,
-                    historyTypes=[
-                        "messageAdded",
-                        "messageDeleted",
-                        "labelAdded",
-                        "labelRemoved",
-                    ],
-                )
-                .execute()
-            )
+            for record, history_id in self._fetch_history_pages(last_history_id):
+                final_history_id = history_id
+                added, deleted, labels = self._process_history_record(record)
+                messages_added += added
+                messages_deleted += deleted
+                label_events += labels
         except HttpError as e:
             if e.resp.status == 404:
-                # History too old, record new baseline
                 logger.warning(
                     f"History {last_history_id} too old, resetting to {new_history_id}"
                 )
@@ -897,49 +974,8 @@ class GmailSync:
                 return
             raise
 
-        # Process history records
-        # IMPORTANT: History ID checkpoint safety
-        # - Each message operation commits independently (for isolation)
-        # - If ANY operation fails, exception propagates and we nack
-        # - History ID only updates AFTER all records are processed
-        # - On retry, idempotency (ON CONFLICT DO NOTHING) prevents duplicates
-        # - This ensures no data loss on crash mid-batch
-        messages_added = 0
-        messages_deleted = 0
-        label_events = 0
-
-        for record in history_response.get("history", []):
-            # New messages
-            for msg_added in record.get("messagesAdded", []):
-                msg_id = msg_added["message"]["id"]
-                self.store_raw_message(msg_id)
-                messages_added += 1
-
-            # Deleted messages - soft delete and cancel pending jobs
-            for msg_deleted in record.get("messagesDeleted", []):
-                msg_id = msg_deleted["message"]["id"]
-                self._process_message_deleted(msg_id)
-                messages_deleted += 1
-
-            # Label additions - enqueue Cortex/* labels for actions service
-            for label_added in record.get("labelsAdded", []):
-                msg_id = label_added["message"]["id"]
-                label_ids = label_added.get("labelIds", [])
-                self._process_label_event(msg_id, label_ids, "added")
-                label_events += 1
-
-            # Label removals - track for corrections
-            for label_removed in record.get("labelsRemoved", []):
-                msg_id = label_removed["message"]["id"]
-                label_ids = label_removed.get("labelIds", [])
-                self._process_label_event(msg_id, label_ids, "removed")
-                label_events += 1
-
-        # Update history ID checkpoint ONLY after all records processed successfully
-        # This is the critical safety point - if we crash before here, we'll
-        # reprocess from the old history_id (safe due to idempotency)
-        new_id = history_response.get("historyId", new_history_id)
-        self._set_last_history_id(email_address, new_id)
+        # Checkpoint after all records processed successfully
+        self._set_last_history_id(email_address, final_history_id or new_history_id)
 
         if messages_added or messages_deleted or label_events:
             logger.info(
