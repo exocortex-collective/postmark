@@ -48,8 +48,7 @@ def _get_or_create_metric(
         # Try full name first, then without _total suffix (for Counters)
         metric = REGISTRY._names_to_collectors.get(name)
         if metric is None:
-            base_name = name.removesuffix("_total")
-            metric = REGISTRY._names_to_collectors.get(base_name)
+            metric = REGISTRY._names_to_collectors.get(name.removesuffix("_total"))
         return metric
 
 
