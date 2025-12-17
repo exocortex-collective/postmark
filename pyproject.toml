@@ -44,6 +44,8 @@ dev = [
 ]
 
 [project.scripts]
+# Main CLI tool
+postmark = "postmark.cli:main"
 # Gmail sync service
 postmark-gmail-sync = "postmark.services.gmail_sync:main"
 # Archived: Gmail takeout batch processing (moved to postmark.archive)
@@ -129,6 +131,11 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = "cortex_utils.*"
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "postmark.cli.*"
+# Click decorators cause "Untyped decorator makes function untyped" errors
+disable_error_code = ["misc"]
 
 [[tool.mypy.overrides]]
 module = "starlette.*"
