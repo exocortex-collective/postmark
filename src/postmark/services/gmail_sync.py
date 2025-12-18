@@ -1165,7 +1165,7 @@ class GmailSync:
         days: int | None = None,
         after: str | None = None,
         job_id: str | None = None,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, int]:
         """Backfill emails from a date.
 
         Fetches message IDs via messages.list, stores any missing messages,
@@ -1177,7 +1177,7 @@ class GmailSync:
             job_id: Optional backfill_jobs.id for progress tracking and cancellation
 
         Returns:
-            Tuple of (stored_count, updated_count) - new messages and label updates
+            Tuple of (processed, stored, updated) - total checked, new, and label updates
 
         Raises:
             BackfillCancelledError: If job was cancelled mid-run
@@ -1301,8 +1301,10 @@ class GmailSync:
                     self._set_last_history_id(email_address, newest_history_id)
                     logger.info(f"Updated history baseline to {newest_history_id}")
 
-        logger.info(f"Backfill complete: stored {stored}, updated {updated}")
-        return stored, updated
+        logger.info(
+            f"Backfill complete: processed {processed}, stored {stored}, updated {updated}"
+        )
+        return processed, stored, updated
 
     def check_backfill_queue(self) -> bool:
         """Check for and process one pending backfill job.
@@ -1342,11 +1344,11 @@ class GmailSync:
         try:
             # Run backfill with job tracking
             if after_date:
-                stored, updated = self.backfill(
+                processed, stored, updated = self.backfill(
                     after=after_date.strftime("%Y-%m-%d"), job_id=job_id
                 )
             elif days:
-                stored, updated = self.backfill(days=days, job_id=job_id)
+                processed, stored, updated = self.backfill(days=days, job_id=job_id)
             else:
                 # Query was provided directly (shouldn't happen in normal flow)
                 raise ValueError(f"Invalid job {job_id}: no days or after_date")
@@ -1357,10 +1359,10 @@ class GmailSync:
                     """
                     UPDATE backfill_jobs
                     SET status = 'completed', completed_at = NOW(),
-                        stored = %s, updated = %s, processed = stored + updated
+                        processed = %s, stored = %s, updated = %s
                     WHERE id = %s
                     """,
-                    (stored, updated, job_id),
+                    (processed, stored, updated, job_id),
                 )
                 conn.commit()
 
@@ -1516,13 +1518,17 @@ def main() -> None:
 
     # Handle backfill modes
     if args.backfill_from:
-        stored, skipped = sync.backfill(after=args.backfill_from)
-        print(f"Backfill complete: {stored} stored, {skipped} skipped")
+        processed, stored, updated = sync.backfill(after=args.backfill_from)
+        print(
+            f"Backfill complete: {processed} processed, {stored} stored, {updated} updated"
+        )
         return
 
     if args.backfill_only:
-        stored, skipped = sync.backfill(days=args.backfill_only)
-        print(f"Backfill complete: {stored} stored, {skipped} skipped")
+        processed, stored, updated = sync.backfill(days=args.backfill_only)
+        print(
+            f"Backfill complete: {processed} processed, {stored} stored, {updated} updated"
+        )
         return
 
     if args.backfill:

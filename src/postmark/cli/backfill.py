@@ -9,6 +9,7 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -127,21 +128,19 @@ def trigger(days: int | None, after: str | None, direct: bool) -> None:
 
     result = api_request("POST", "/sync/backfill", data)
 
-    click.echo(f"Backfill job created:")
+    click.echo("Backfill job created:")
     click.echo(f"  ID: {result['id']}")
     click.echo(f"  Status: {result['status']}")
     click.echo(f"  Query: {result['query']}")
-    click.echo(
-        f"\nUse 'postmark backfill status --id {result['id']}' to check progress"
-    )
+    click.echo(f"\nUse 'postmark backfill status {result['id']}' to check progress")
 
 
 @backfill.command("status")
-@click.option("--id", "job_id", type=str, help="Get status of a specific job")
+@click.argument("job_id")
 @click.option(
     "--watch",
     is_flag=True,
-    help="Watch job progress until completion (requires --id)",
+    help="Watch job progress until completion",
 )
 @click.option(
     "--interval",
@@ -149,31 +148,21 @@ def trigger(days: int | None, after: str | None, direct: bool) -> None:
     default=5,
     help="Poll interval in seconds for --watch (default: 5)",
 )
-def status(job_id: str | None, watch: bool, interval: int) -> None:
-    """Check status of backfill jobs.
+def status(job_id: str, watch: bool, interval: int) -> None:
+    """Check status of a specific backfill job.
 
-    Without --id, lists recent jobs.
-    With --id, shows details for a specific job.
-    With --watch, polls until job completes.
+    Use 'postmark backfill list' to see all jobs.
 
     Examples:
 
-        postmark backfill status
+        postmark backfill status abc123
 
-        postmark backfill status --id abc123
-
-        postmark backfill status --id abc123 --watch
+        postmark backfill status abc123 --watch
     """
-    if watch and not job_id:
-        raise click.ClickException("--watch requires --id")
-
-    if job_id:
-        if watch:
-            _watch_job(job_id, interval)
-        else:
-            _show_job(job_id)
+    if watch:
+        _watch_job(job_id, interval)
     else:
-        _list_jobs()
+        _show_job(job_id)
 
 
 @backfill.command("list")
@@ -195,9 +184,10 @@ def list_jobs(filter_status: str | None, limit: int) -> None:
 
         postmark backfill list --limit 50
     """
-    params = f"?limit={limit}"
+    query_params: dict[str, Any] = {"limit": limit}
     if filter_status:
-        params += f"&status={filter_status}"
+        query_params["status"] = filter_status
+    params = f"?{urllib.parse.urlencode(query_params)}"
 
     result = api_request("GET", f"/sync/backfill{params}")
     jobs = result.get("jobs", [])
@@ -265,28 +255,6 @@ def _show_job(job_id: str) -> None:
         click.echo(f"Completed: {result['completed_at']}")
 
 
-def _list_jobs() -> None:
-    """List recent jobs."""
-    result = api_request("GET", "/sync/backfill?limit=10")
-    jobs = result.get("jobs", [])
-
-    if not jobs:
-        click.echo("No backfill jobs found")
-        return
-
-    click.echo(
-        f"{'ID':<12} {'Status':<10} {'Processed':<10} {'Stored':<8} {'Query':<25}"
-    )
-    click.echo("-" * 70)
-
-    for job in jobs:
-        job_id = job["id"][:10] + ".." if len(job["id"]) > 12 else job["id"]
-        click.echo(
-            f"{job_id:<12} {job['status']:<10} {job['processed']:<10} "
-            f"{job['stored']:<8} {job['query']:<25}"
-        )
-
-
 def _watch_job(job_id: str, interval: int) -> None:
     """Watch job progress until completion."""
     terminal_states = {"completed", "cancelled", "failed"}
@@ -337,10 +305,12 @@ def _run_direct_backfill(days: int | None, after: str | None) -> None:
     sync = GmailSync(config)
 
     if days:
-        stored, updated = sync.backfill(days=days)
+        processed, stored, updated = sync.backfill(days=days)
     elif after:
-        stored, updated = sync.backfill(after=after)
+        processed, stored, updated = sync.backfill(after=after)
     else:
         raise click.ClickException("Provide either --days or --after")
 
-    click.echo(f"Backfill complete: {stored} stored, {updated} updated")
+    click.echo(
+        f"Backfill complete: {processed} processed, {stored} stored, {updated} updated"
+    )
