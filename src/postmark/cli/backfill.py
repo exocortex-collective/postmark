@@ -46,12 +46,13 @@ def api_request(
         if data is not None:
             body = json.dumps(data).encode()
             req = urllib.request.Request(
-                url, data=body, headers={"Content-Type": "application/json"}
+                url,
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method=method,
             )
         else:
-            req = urllib.request.Request(url)
-
-        req.method = method
+            req = urllib.request.Request(url, method=method)
 
         with urllib.request.urlopen(req, timeout=30) as resp:
             result: dict[str, Any] = json.loads(resp.read().decode())
@@ -236,23 +237,23 @@ def _show_job(job_id: str) -> None:
     """Show details for a specific job."""
     result = api_request("GET", f"/sync/backfill/{job_id}")
 
-    click.echo(f"Job ID: {result['id']}")
-    click.echo(f"Status: {result['status']}")
-    click.echo(f"Query: {result['query']}")
-    if result.get("days"):
-        click.echo(f"Days: {result['days']}")
-    if result.get("after_date"):
-        click.echo(f"After: {result['after_date']}")
-    click.echo(f"Processed: {result['processed']}")
-    click.echo(f"Stored: {result['stored']}")
-    click.echo(f"Updated: {result['updated']}")
-    if result.get("error"):
-        click.echo(f"Error: {result['error']}")
-    click.echo(f"Created: {result['created_at']}")
-    if result.get("started_at"):
-        click.echo(f"Started: {result['started_at']}")
-    if result.get("completed_at"):
-        click.echo(f"Completed: {result['completed_at']}")
+    click.echo(f"Job ID: {result.get('id', 'N/A')}")
+    click.echo(f"Status: {result.get('status', 'N/A')}")
+    click.echo(f"Query: {result.get('query', 'N/A')}")
+    if (days := result.get("days")) is not None:
+        click.echo(f"Days: {days}")
+    if (after_date := result.get("after_date")) is not None:
+        click.echo(f"After: {after_date}")
+    click.echo(f"Processed: {result.get('processed', 0)}")
+    click.echo(f"Stored: {result.get('stored', 0)}")
+    click.echo(f"Updated: {result.get('updated', 0)}")
+    if (error := result.get("error")) is not None:
+        click.echo(f"Error: {error}")
+    click.echo(f"Created: {result.get('created_at', 'N/A')}")
+    if (started_at := result.get("started_at")) is not None:
+        click.echo(f"Started: {started_at}")
+    if (completed_at := result.get("completed_at")) is not None:
+        click.echo(f"Completed: {completed_at}")
 
 
 def _watch_job(job_id: str, interval: int) -> None:
@@ -263,9 +264,9 @@ def _watch_job(job_id: str, interval: int) -> None:
         result = api_request("GET", f"/sync/backfill/{job_id}")
 
         # Clear line and print progress
-        status_str = result["status"]
-        processed = result["processed"]
-        stored = result["stored"]
+        status_str = result.get("status", "unknown")
+        processed = result.get("processed", 0)
+        stored = result.get("stored", 0)
 
         sys.stdout.write(
             f"\rStatus: {status_str} | Processed: {processed} | Stored: {stored}   "
@@ -276,7 +277,7 @@ def _watch_job(job_id: str, interval: int) -> None:
             click.echo()  # Newline after progress
             if status_str == "completed":
                 click.echo(
-                    f"Backfill completed: {stored} stored, {result['updated']} updated"
+                    f"Backfill completed: {stored} stored, {result.get('updated', 0)} updated"
                 )
             elif status_str == "cancelled":
                 click.echo("Backfill was cancelled")

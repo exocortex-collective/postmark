@@ -1212,6 +1212,7 @@ class GmailSync:
             # Check for cancellation between pages
             if job_id and self._is_backfill_cancelled(job_id):
                 logger.info(f"Backfill job {job_id} cancelled, stopping")
+                self._update_backfill_progress(job_id, processed, stored, updated)
                 raise BackfillCancelledError(f"Job {job_id} was cancelled")
 
             result = (
