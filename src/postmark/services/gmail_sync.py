@@ -50,6 +50,16 @@ PUBSUB_MESSAGES = Counter(
 # Queue priority for backfill jobs (lower = deprioritized vs real-time mail)
 BACKFILL_PRIORITY = -100
 
+# How often to update backfill progress in database (every N messages)
+BACKFILL_PROGRESS_INTERVAL = 50
+
+
+class BackfillCancelledError(Exception):
+    """Raised when a backfill job is cancelled mid-run."""
+
+    pass
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -310,6 +320,30 @@ class GmailSync:
                 -- GIN index for efficient array queries (e.g. WHERE 'Cortex' = ANY(name_parts))
                 CREATE INDEX IF NOT EXISTS idx_gmail_labels_parts
                     ON gmail_labels USING GIN(name_parts);
+
+                -- Backfill jobs table for queue-based historical sync
+                -- Gateway/CLI insert jobs, gmail-sync polls and executes them
+                CREATE TABLE IF NOT EXISTS backfill_jobs (
+                    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    query TEXT NOT NULL,
+                    days INTEGER,
+                    after_date DATE,
+                    processed INTEGER DEFAULT 0,
+                    stored INTEGER DEFAULT 0,
+                    updated INTEGER DEFAULT 0,
+                    error TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    started_at TIMESTAMPTZ,
+                    completed_at TIMESTAMPTZ,
+                    CONSTRAINT backfill_jobs_valid_status CHECK (
+                        status IN ('pending', 'running', 'completed', 'cancelled', 'failed')
+                    )
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_backfill_jobs_pending
+                    ON backfill_jobs(status, created_at)
+                    WHERE status IN ('pending', 'running');
             """
             )
         logger.info("Postgres schema ensured")
@@ -1101,9 +1135,37 @@ class GmailSync:
             # Re-raise so the error is visible and can trigger alerts
             raise
 
+    def _update_backfill_progress(
+        self, job_id: str, processed: int, stored: int, updated: int
+    ) -> None:
+        """Update backfill job progress in database."""
+        with self._get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE backfill_jobs
+                SET processed = %s, stored = %s, updated = %s
+                WHERE id = %s
+                """,
+                (processed, stored, updated, job_id),
+            )
+            conn.commit()
+
+    def _is_backfill_cancelled(self, job_id: str) -> bool:
+        """Check if a backfill job has been cancelled."""
+        with self._get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM backfill_jobs WHERE id = %s",
+                (job_id,),
+            )
+            row = cur.fetchone()
+            return row is not None and row[0] == "cancelled"
+
     def backfill(
-        self, days: int | None = None, after: str | None = None
-    ) -> tuple[int, int]:
+        self,
+        days: int | None = None,
+        after: str | None = None,
+        job_id: str | None = None,
+    ) -> tuple[int, int, int]:
         """Backfill emails from a date.
 
         Fetches message IDs via messages.list, stores any missing messages,
@@ -1112,9 +1174,13 @@ class GmailSync:
         Args:
             days: Number of days back from today (e.g., 7 for last week)
             after: Absolute date in YYYY-MM-DD format (e.g., "2025-01-01")
+            job_id: Optional backfill_jobs.id for progress tracking and cancellation
 
         Returns:
-            Tuple of (stored_count, updated_count) - new messages and label updates
+            Tuple of (processed, stored, updated) - total checked, new, and label updates
+
+        Raises:
+            BackfillCancelledError: If job was cancelled mid-run
         """
         if after:
             # Parse absolute date with validation
@@ -1137,11 +1203,18 @@ class GmailSync:
 
         stored = 0
         updated = 0
+        processed = 0
         newest_message_id: str | None = None
         page_token: str | None = None
 
         # Process messages page by page to avoid loading all IDs into memory
         while True:
+            # Check for cancellation between pages
+            if job_id and self._is_backfill_cancelled(job_id):
+                logger.info(f"Backfill job {job_id} cancelled, stopping")
+                self._update_backfill_progress(job_id, processed, stored, updated)
+                raise BackfillCancelledError(f"Job {job_id} was cancelled")
+
             result = (
                 self.gmail.users()
                 .messages()
@@ -1177,9 +1250,17 @@ class GmailSync:
                         updated += 1
                     else:
                         stored += 1
+                    processed += 1
 
-                    if (stored + updated) % 100 == 0:
-                        logger.info(f"Progress: stored {stored}, updated {updated}")
+                    # Update progress in database periodically
+                    if job_id and processed % BACKFILL_PROGRESS_INTERVAL == 0:
+                        self._update_backfill_progress(
+                            job_id, processed, stored, updated
+                        )
+                        logger.info(
+                            f"Backfill progress: processed {processed}, "
+                            f"stored {stored}, updated {updated}"
+                        )
 
                 except (
                     HttpError,
@@ -1189,6 +1270,7 @@ class GmailSync:
                     RuntimeError,
                 ) as e:
                     logger.error(f"Failed to process {gmail_id}: {e}")
+                    processed += 1
 
             page_token = result.get("nextPageToken")
             if not page_token:
@@ -1220,8 +1302,100 @@ class GmailSync:
                     self._set_last_history_id(email_address, newest_history_id)
                     logger.info(f"Updated history baseline to {newest_history_id}")
 
-        logger.info(f"Backfill complete: stored {stored}, updated {updated}")
-        return stored, updated
+        logger.info(
+            f"Backfill complete: processed {processed}, stored {stored}, updated {updated}"
+        )
+        return processed, stored, updated
+
+    def check_backfill_queue(self) -> bool:
+        """Check for and process one pending backfill job.
+
+        Returns True if a job was found and processed (or failed/cancelled).
+        Returns False if no pending jobs.
+
+        This method is designed to be called periodically from the main loop,
+        processing one job at a time to avoid blocking real-time mail.
+        """
+        # Claim a pending job atomically
+        with self._get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE backfill_jobs
+                SET status = 'running', started_at = NOW()
+                WHERE id = (
+                    SELECT id FROM backfill_jobs
+                    WHERE status = 'pending'
+                    ORDER BY created_at
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING id, query, days, after_date
+                """
+            )
+            row = cur.fetchone()
+            conn.commit()
+
+            if not row:
+                return False
+
+            job_id, query, days, after_date = row
+
+        logger.info(f"Starting backfill job {job_id}: {query}")
+
+        try:
+            # Run backfill with job tracking
+            if after_date:
+                processed, stored, updated = self.backfill(
+                    after=after_date.strftime("%Y-%m-%d"), job_id=job_id
+                )
+            elif days:
+                processed, stored, updated = self.backfill(days=days, job_id=job_id)
+            else:
+                # Query was provided directly (shouldn't happen in normal flow)
+                raise ValueError(f"Invalid job {job_id}: no days or after_date")
+
+            # Mark completed
+            with self._get_conn() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE backfill_jobs
+                    SET status = 'completed', completed_at = NOW(),
+                        processed = %s, stored = %s, updated = %s
+                    WHERE id = %s
+                    """,
+                    (processed, stored, updated, job_id),
+                )
+                conn.commit()
+
+            logger.info(
+                f"Backfill job {job_id} completed: {stored} stored, {updated} updated"
+            )
+
+        except BackfillCancelledError:
+            # Job was cancelled - already logged, just update final counts
+            with self._get_conn() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE backfill_jobs SET completed_at = NOW() WHERE id = %s",
+                    (job_id,),
+                )
+                conn.commit()
+            logger.info(f"Backfill job {job_id} cancelled")
+
+        except Exception as e:
+            # Mark failed with error message
+            with self._get_conn() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE backfill_jobs
+                    SET status = 'failed', completed_at = NOW(), error = %s
+                    WHERE id = %s
+                    """,
+                    (str(e)[:1000], job_id),  # Truncate error to avoid huge strings
+                )
+                conn.commit()
+            logger.error(f"Backfill job {job_id} failed: {e}")
+
+        return True
 
     def fallback_poll(self) -> None:
         """Hourly fallback poll to catch missed notifications."""
@@ -1245,6 +1419,16 @@ class GmailSync:
             # Don't re-raise here to keep scheduler running
             logger.debug(f"Handled exception during scheduled watch renewal: {e!r}")
 
+    def _safe_check_backfill_queue(self) -> None:
+        """Wrapper for backfill queue check that won't crash scheduler."""
+        try:
+            self.check_backfill_queue()
+        except Exception as e:
+            logger.error(f"Error checking backfill queue: {e}", exc_info=True)
+            ERRORS.labels(
+                service="gmail-sync", error_type="backfill_check_failed"
+            ).inc()
+
     def run(self) -> None:
         """Main entry point - start the service."""
         logger.info("Starting Gmail sync service")
@@ -1257,6 +1441,8 @@ class GmailSync:
         # Renew watch every 12 hours (watch expires after 7 days, so plenty of buffer)
         schedule.every(12).hours.do(self._safe_renew_watch)
         schedule.every().hour.do(self.fallback_poll)
+        # Check for queued backfill jobs every minute
+        schedule.every(1).minutes.do(self._safe_check_backfill_queue)
 
         # Start scheduler in background thread
         scheduler_thread = threading.Thread(target=self.run_scheduler, daemon=True)
@@ -1333,13 +1519,17 @@ def main() -> None:
 
     # Handle backfill modes
     if args.backfill_from:
-        stored, skipped = sync.backfill(after=args.backfill_from)
-        print(f"Backfill complete: {stored} stored, {skipped} skipped")
+        processed, stored, updated = sync.backfill(after=args.backfill_from)
+        print(
+            f"Backfill complete: {processed} processed, {stored} stored, {updated} updated"
+        )
         return
 
     if args.backfill_only:
-        stored, skipped = sync.backfill(days=args.backfill_only)
-        print(f"Backfill complete: {stored} stored, {skipped} skipped")
+        processed, stored, updated = sync.backfill(days=args.backfill_only)
+        print(
+            f"Backfill complete: {processed} processed, {stored} stored, {updated} updated"
+        )
         return
 
     if args.backfill:
