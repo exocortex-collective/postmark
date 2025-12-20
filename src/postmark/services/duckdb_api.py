@@ -182,15 +182,18 @@ def _extract_body_text(parts: Any, body_data: str | None = None) -> str | None:
     """
     if not parts:
         # Fallback to body_data if parts is empty
-        if body_data:
-            html_content = _decode_base64_urlsafe(body_data)
-            if html_content:
-                try:
-                    return _html_to_markdown(html_content)
-                except Exception:
-                    logger.warning("html2text failed on body_data, returning None")
-                    return None
-        return None
+        if not body_data:
+            return None
+
+        html_content = _decode_base64_urlsafe(body_data)
+        if not html_content:
+            return None
+
+        try:
+            return _html_to_markdown(html_content)
+        except Exception:
+            logger.warning("html2text failed on body_data, returning None")
+            return None
 
     plain_body_data = None
     html_body_data = None
