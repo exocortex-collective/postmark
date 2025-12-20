@@ -166,7 +166,7 @@ def _looks_like_html(text: str) -> bool:
     return len(tags) >= 3 and indicator_count >= 2
 
 
-def _extract_body_text(parts: Any) -> str | None:
+def _extract_body_text(parts: Any, body_data: str | None = None) -> str | None:
     """Extract text body from Gmail message parts (markdown format).
 
     Looks for text/plain first, falls back to text/html (converted to markdown).
@@ -175,10 +175,31 @@ def _extract_body_text(parts: Any) -> str | None:
     Some email senders incorrectly label HTML content as text/plain.
     We detect this and convert it properly using html2text.
 
+    If parts is empty but body_data is provided (base64-encoded HTML),
+    decodes and converts body_data as final fallback.
+
     Returns markdown-formatted text (preserving bold/italic/links).
     """
     if not parts:
-        return None
+        # Fallback to body_data if parts is empty
+        if not body_data:
+            return None
+
+        content = _decode_base64_urlsafe(body_data)
+        if not content:
+            return None
+
+        # Only convert to markdown if content looks like HTML
+        if _looks_like_html(content):
+            try:
+                return _html_to_markdown(content)
+            except Exception:
+                # Broad catch: html2text can fail in various ways on malformed HTML
+                logger.warning(
+                    "html2text failed on body_data, returning raw content",
+                    exc_info=True,
+                )
+        return content
 
     plain_body_data = None
     html_body_data = None
@@ -451,8 +472,8 @@ def get_body(
 
     # Deserialize JSON parts for cleaner API response
     parts_data = json.loads(result[0]) if result[0] else None
-    # Extract decoded body text from parts
-    body_text = _extract_body_text(parts_data)
+    # Extract decoded body text from parts (with body_data fallback)
+    body_text = _extract_body_text(parts_data, result[1])
     return BodyResponse(
         gmail_id=gmail_id,
         parts=parts_data,
@@ -470,12 +491,16 @@ def get_mail_text(
     Returns decoded text body. If the email has only HTML (or text/plain
     that is actually mislabeled HTML), the content is converted to markdown
     preserving bold/italic formatting and links.
+
+    Falls back to body_data if parts is empty (some emails store HTML
+    in body_data without structured parts).
+
     This is the preferred endpoint for downstream text processing.
     """
     with _lock:
         conn = get_connection()
         result = conn.execute(
-            "SELECT parts FROM email_bodies WHERE gmail_id = ?",
+            "SELECT parts, body_data FROM email_bodies WHERE gmail_id = ?",
             [gmail_id],
         ).fetchone()
 
@@ -485,7 +510,7 @@ def get_mail_text(
         )
 
     parts_data = json.loads(result[0]) if result[0] else None
-    text = _extract_body_text(parts_data)
+    text = _extract_body_text(parts_data, result[1])
     return MailTextResponse(gmail_id=gmail_id, text=text)
 
 
@@ -508,14 +533,14 @@ def get_bodies(
             id_list,
         ).fetchall()
 
-    # Deserialize JSON parts and extract body text
+    # Deserialize JSON parts and extract body text (with body_data fallback)
     bodies: dict[str, BodyDetails] = {}
     for row in rows:
         parts_data = json.loads(row[1]) if row[1] else None
         bodies[row[0]] = BodyDetails(
             parts=parts_data,
             body_data=row[2],
-            body_text=_extract_body_text(parts_data),
+            body_text=_extract_body_text(parts_data, row[2]),
         )
     return BodiesResponse(bodies=bodies)
 
