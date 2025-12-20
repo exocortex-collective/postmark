@@ -185,15 +185,21 @@ def _extract_body_text(parts: Any, body_data: str | None = None) -> str | None:
         if not body_data:
             return None
 
-        html_content = _decode_base64_urlsafe(body_data)
-        if not html_content:
+        content = _decode_base64_urlsafe(body_data)
+        if not content:
             return None
 
-        try:
-            return _html_to_markdown(html_content)
-        except Exception:
-            logger.warning("html2text failed on body_data, returning None")
-            return None
+        # Only convert to markdown if content looks like HTML
+        if _looks_like_html(content):
+            try:
+                return _html_to_markdown(content)
+            except Exception:
+                logger.warning(
+                    "html2text failed on body_data, returning raw content",
+                    exc_info=True,
+                )
+                return content
+        return content
 
     plain_body_data = None
     html_body_data = None
