@@ -194,6 +194,7 @@ def _extract_body_text(parts: Any, body_data: str | None = None) -> str | None:
             try:
                 return _html_to_markdown(content)
             except Exception:
+                # Broad catch: html2text can fail in various ways on malformed HTML
                 logger.warning(
                     "html2text failed on body_data, returning raw content",
                     exc_info=True,
