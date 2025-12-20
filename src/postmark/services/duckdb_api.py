@@ -198,7 +198,6 @@ def _extract_body_text(parts: Any, body_data: str | None = None) -> str | None:
                     "html2text failed on body_data, returning raw content",
                     exc_info=True,
                 )
-                return content
         return content
 
     plain_body_data = None
