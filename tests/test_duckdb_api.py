@@ -1,0 +1,232 @@
+"""Tests for DuckDB API endpoints."""
+
+import os
+import tempfile
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+
+@pytest.fixture
+def test_db():
+    """Create a temporary DuckDB database for testing."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.duckdb"
+        os.environ["DUCKDB_PATH"] = str(db_path)
+        # Force reload of the module to pick up new env var
+        import importlib
+
+        from postmark.services import duckdb_api
+
+        importlib.reload(duckdb_api)
+        yield duckdb_api.app
+        # Cleanup
+        if db_path.exists():
+            db_path.unlink()
+
+
+@pytest.fixture
+def client(test_db):
+    """Create a test client."""
+    return TestClient(test_db)
+
+
+def test_health_check(client):
+    """Test health check endpoint."""
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_stats_empty(client):
+    """Test stats endpoint with empty database."""
+    response = client.get("/stats")
+    assert response.status_code == 200
+    assert response.json()["count"] == 0
+
+
+def test_store_and_get_body(client):
+    """Test storing and retrieving a single email body."""
+    # Store a body
+    body_data = {
+        "gmail_id": "test123",
+        "parts": [{"mimeType": "text/plain", "body": {"data": "SGVsbG8gV29ybGQ="}}],
+        "body_data": None,
+    }
+    response = client.post("/body", json=body_data)
+    assert response.status_code == 201
+    assert response.json() == {"status": "ok"}
+
+    # Retrieve it
+    response = client.get("/body", params={"gmail_id": "test123"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["gmail_id"] == "test123"
+    assert data["parts"] is not None
+    assert data["body_text"] == "Hello World"
+
+
+def test_gmail_ids_default_limit(client):
+    """Test /gmail_ids endpoint applies default limit of 10000."""
+    # Store 15 test emails
+    for i in range(15):
+        client.post(
+            "/body",
+            json={
+                "gmail_id": f"test{i:03d}",
+                "parts": [
+                    {"mimeType": "text/plain", "body": {"data": "SGVsbG8gV29ybGQ="}}
+                ],
+                "body_data": None,
+            },
+        )
+
+    # Without limit param, should use default (but we only have 15 records)
+    response = client.get("/gmail_ids")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["count"] == 15
+    assert len(data["gmail_ids"]) == 15
+
+
+def test_gmail_ids_explicit_limit(client):
+    """Test /gmail_ids endpoint respects explicit limit parameter."""
+    # Store 15 test emails
+    for i in range(15):
+        client.post(
+            "/body",
+            json={
+                "gmail_id": f"test{i:03d}",
+                "parts": [
+                    {"mimeType": "text/plain", "body": {"data": "SGVsbG8gV29ybGQ="}}
+                ],
+                "body_data": None,
+            },
+        )
+
+    # Explicit limit=5
+    response = client.get("/gmail_ids", params={"limit": 5})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["count"] == 5
+    assert len(data["gmail_ids"]) == 5
+
+
+def test_gmail_ids_unlimited(client):
+    """Test /gmail_ids endpoint with limit=0 returns all records."""
+    # Store 15 test emails
+    for i in range(15):
+        client.post(
+            "/body",
+            json={
+                "gmail_id": f"test{i:03d}",
+                "parts": [
+                    {"mimeType": "text/plain", "body": {"data": "SGVsbG8gV29ybGQ="}}
+                ],
+                "body_data": None,
+            },
+        )
+
+    # Explicit limit=0 should return all
+    response = client.get("/gmail_ids", params={"limit": 0})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["count"] == 15
+    assert len(data["gmail_ids"]) == 15
+
+
+def test_gmail_ids_pagination(client):
+    """Test /gmail_ids endpoint pagination with offset."""
+    # Store 15 test emails
+    for i in range(15):
+        client.post(
+            "/body",
+            json={
+                "gmail_id": f"test{i:03d}",
+                "parts": [
+                    {"mimeType": "text/plain", "body": {"data": "SGVsbG8gV29ybGQ="}}
+                ],
+                "body_data": None,
+            },
+        )
+
+    # First page
+    response = client.get("/gmail_ids", params={"limit": 5, "offset": 0})
+    assert response.status_code == 200
+    page1 = response.json()
+    assert page1["count"] == 5
+
+    # Second page
+    response = client.get("/gmail_ids", params={"limit": 5, "offset": 5})
+    assert response.status_code == 200
+    page2 = response.json()
+    assert page2["count"] == 5
+
+    # Pages should have different IDs
+    assert set(page1["gmail_ids"]) != set(page2["gmail_ids"])
+
+
+def test_body_not_found(client):
+    """Test retrieving non-existent body returns 404."""
+    response = client.get("/body", params={"gmail_id": "nonexistent"})
+    assert response.status_code == 404
+    assert "No body found" in response.json()["detail"]
+
+
+def test_mail_text(client):
+    """Test /mail_text endpoint returns formatted text."""
+    # Store a body with HTML
+    body_data = {
+        "gmail_id": "test123",
+        "parts": [
+            {
+                "mimeType": "text/html",
+                "body": {"data": "PGI+SGVsbG88L2I+IFdvcmxk"},  # <b>Hello</b> World
+            }
+        ],
+        "body_data": None,
+    }
+    response = client.post("/body", json=body_data)
+    assert response.status_code == 201
+
+    # Retrieve formatted text
+    response = client.get("/mail_text", params={"gmail_id": "test123"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["gmail_id"] == "test123"
+    assert "**Hello**" in data["text"]  # HTML should be converted to markdown
+
+
+def test_bodies_batch(client):
+    """Test /bodies endpoint batch retrieval."""
+    # Store 3 bodies
+    for i in range(3):
+        client.post(
+            "/body",
+            json={
+                "gmail_id": f"test{i}",
+                "parts": [
+                    {"mimeType": "text/plain", "body": {"data": "SGVsbG8gV29ybGQ="}}
+                ],
+                "body_data": None,
+            },
+        )
+
+    # Batch retrieve
+    response = client.get("/bodies", params={"gmail_ids": "test0,test1,test2"})
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["bodies"]) == 3
+    assert "test0" in data["bodies"]
+    assert "test1" in data["bodies"]
+    assert "test2" in data["bodies"]
+
+
+def test_bodies_max_limit(client):
+    """Test /bodies endpoint enforces max 100 IDs."""
+    # Try to request 101 IDs
+    gmail_ids = ",".join([f"test{i}" for i in range(101)])
+    response = client.get("/bodies", params={"gmail_ids": gmail_ids})
+    assert response.status_code == 400
+    assert "Max 100 gmail_ids" in response.json()["detail"]
