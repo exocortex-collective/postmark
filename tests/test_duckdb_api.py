@@ -32,6 +32,23 @@ def client(test_db):
     return TestClient(test_db)
 
 
+@pytest.fixture
+def populated_db_client(client):
+    """Client with a DB pre-populated with 15 test emails."""
+    for i in range(15):
+        client.post(
+            "/body",
+            json={
+                "gmail_id": f"test{i:03d}",
+                "parts": [
+                    {"mimeType": "text/plain", "body": {"data": "SGVsbG8gV29ybGQ="}}
+                ],
+                "body_data": None,
+            },
+        )
+    return client
+
+
 def test_health_check(client):
     """Test health check endpoint."""
     response = client.get("/health")
@@ -67,104 +84,73 @@ def test_store_and_get_body(client):
     assert data["body_text"] == "Hello World"
 
 
-def test_gmail_ids_default_limit(client):
+def test_gmail_ids_default_limit(populated_db_client):
     """Test /gmail_ids endpoint applies default limit of 10000."""
-    # Store 15 test emails
-    for i in range(15):
-        client.post(
-            "/body",
-            json={
-                "gmail_id": f"test{i:03d}",
-                "parts": [
-                    {"mimeType": "text/plain", "body": {"data": "SGVsbG8gV29ybGQ="}}
-                ],
-                "body_data": None,
-            },
-        )
-
     # Without limit param, should use default (but we only have 15 records)
-    response = client.get("/gmail_ids")
+    response = populated_db_client.get("/gmail_ids")
     assert response.status_code == 200
     data = response.json()
     assert data["count"] == 15
     assert len(data["gmail_ids"]) == 15
 
 
-def test_gmail_ids_explicit_limit(client):
+def test_gmail_ids_explicit_limit(populated_db_client):
     """Test /gmail_ids endpoint respects explicit limit parameter."""
-    # Store 15 test emails
-    for i in range(15):
-        client.post(
-            "/body",
-            json={
-                "gmail_id": f"test{i:03d}",
-                "parts": [
-                    {"mimeType": "text/plain", "body": {"data": "SGVsbG8gV29ybGQ="}}
-                ],
-                "body_data": None,
-            },
-        )
-
     # Explicit limit=5
-    response = client.get("/gmail_ids", params={"limit": 5})
+    response = populated_db_client.get("/gmail_ids", params={"limit": 5})
     assert response.status_code == 200
     data = response.json()
     assert data["count"] == 5
     assert len(data["gmail_ids"]) == 5
 
 
-def test_gmail_ids_unlimited(client):
+def test_gmail_ids_unlimited(populated_db_client):
     """Test /gmail_ids endpoint with limit=0 returns all records."""
-    # Store 15 test emails
-    for i in range(15):
-        client.post(
-            "/body",
-            json={
-                "gmail_id": f"test{i:03d}",
-                "parts": [
-                    {"mimeType": "text/plain", "body": {"data": "SGVsbG8gV29ybGQ="}}
-                ],
-                "body_data": None,
-            },
-        )
-
     # Explicit limit=0 should return all
-    response = client.get("/gmail_ids", params={"limit": 0})
+    response = populated_db_client.get("/gmail_ids", params={"limit": 0})
     assert response.status_code == 200
     data = response.json()
     assert data["count"] == 15
     assert len(data["gmail_ids"]) == 15
 
 
-def test_gmail_ids_pagination(client):
+def test_gmail_ids_pagination(populated_db_client):
     """Test /gmail_ids endpoint pagination with offset."""
-    # Store 15 test emails
-    for i in range(15):
-        client.post(
-            "/body",
-            json={
-                "gmail_id": f"test{i:03d}",
-                "parts": [
-                    {"mimeType": "text/plain", "body": {"data": "SGVsbG8gV29ybGQ="}}
-                ],
-                "body_data": None,
-            },
-        )
-
     # First page
-    response = client.get("/gmail_ids", params={"limit": 5, "offset": 0})
+    response = populated_db_client.get("/gmail_ids", params={"limit": 5, "offset": 0})
     assert response.status_code == 200
     page1 = response.json()
     assert page1["count"] == 5
 
     # Second page
-    response = client.get("/gmail_ids", params={"limit": 5, "offset": 5})
+    response = populated_db_client.get("/gmail_ids", params={"limit": 5, "offset": 5})
     assert response.status_code == 200
     page2 = response.json()
     assert page2["count"] == 5
 
     # Pages should have different IDs
     assert set(page1["gmail_ids"]) != set(page2["gmail_ids"])
+
+
+def test_gmail_ids_unlimited_with_offset(populated_db_client):
+    """Test /gmail_ids with limit=0 (unlimited) respects offset parameter."""
+    # Get all IDs from the beginning
+    response_all = populated_db_client.get("/gmail_ids", params={"limit": 0})
+    assert response_all.status_code == 200
+    all_ids = response_all.json()["gmail_ids"]
+
+    # Get all IDs starting from offset 10
+    response_offset = populated_db_client.get(
+        "/gmail_ids", params={"limit": 0, "offset": 10}
+    )
+    assert response_offset.status_code == 200
+    offset_ids = response_offset.json()["gmail_ids"]
+
+    # Should get 5 IDs (15 total - 10 offset)
+    assert len(offset_ids) == 5
+
+    # The offset IDs should match the last 5 from all IDs
+    assert offset_ids == all_ids[10:]
 
 
 def test_body_not_found(client):

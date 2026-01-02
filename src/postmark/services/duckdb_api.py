@@ -463,9 +463,18 @@ def get_gmail_ids(
                 operation="read",
             )
         else:
-            rows = _execute_query(
-                conn, "SELECT gmail_id FROM email_bodies", operation="read"
-            )
+            # For limit=0 (unlimited), we should still respect the offset
+            if offset > 0:
+                rows = _execute_query(
+                    conn,
+                    "SELECT gmail_id FROM email_bodies OFFSET ?",
+                    [offset],
+                    operation="read",
+                )
+            else:
+                rows = _execute_query(
+                    conn, "SELECT gmail_id FROM email_bodies", operation="read"
+                )
     gmail_ids = [row[0] for row in rows.fetchall()]
     return GmailIdsResponse(gmail_ids=gmail_ids, count=len(gmail_ids))
 
