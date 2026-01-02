@@ -84,14 +84,23 @@ def test_store_and_get_body(client):
     assert data["body_text"] == "Hello World"
 
 
-def test_gmail_ids_default_limit(populated_db_client):
-    """Test /gmail_ids endpoint applies default limit of 10000."""
-    # Without limit param, should use default (but we only have 15 records)
+def test_gmail_ids_default_limit(populated_db_client, monkeypatch):
+    """Test /gmail_ids endpoint applies default limit."""
+    # Patch the default limit to a small number for testing
+    import postmark.services.duckdb_api
+
+    monkeypatch.setattr(postmark.services.duckdb_api, "GMAIL_IDS_DEFAULT_LIMIT", 5)
+
+    # Without limit param, should use the patched default limit (5)
     response = populated_db_client.get("/gmail_ids")
     assert response.status_code == 200
     data = response.json()
-    assert data["count"] == 15
-    assert len(data["gmail_ids"]) == 15
+    assert data["count"] == 5
+    assert len(data["gmail_ids"]) == 5
+
+    # Verify it's actually enforcing the limit (we have 15 records total)
+    # Should only get 5 even though more are available
+    assert data["count"] < 15
 
 
 def test_gmail_ids_explicit_limit(populated_db_client):
