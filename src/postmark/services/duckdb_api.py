@@ -471,8 +471,9 @@ def get_gmail_ids(
             params.append(offset)
 
         rows = _execute_query(conn, sql, params, operation="read")
+        # Fetch results within lock to prevent race conditions
+        gmail_ids = [row[0] for row in rows.fetchall()]
 
-    gmail_ids = [row[0] for row in rows.fetchall()]
     return GmailIdsResponse(gmail_ids=gmail_ids, count=len(gmail_ids))
 
 
