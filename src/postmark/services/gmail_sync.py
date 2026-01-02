@@ -60,6 +60,38 @@ class BackfillCancelledError(Exception):
     pass
 
 
+def is_retryable_http_error(error: HttpError) -> bool:
+    """Check if an HttpError from Gmail API should be retried.
+
+    Retryable: 5XX server errors, 429 rate limit, 503 service unavailable
+    Non-retryable: 404 not found, 400 bad request, 403 forbidden
+    """
+    if not isinstance(error, HttpError):
+        return True  # Not an HttpError, let caller decide
+
+    status = error.resp.status
+    # 5XX errors are transient server issues - retry
+    if status >= 500:
+        return True
+    # 429 rate limit - retry with backoff
+    if status == 429:
+        return True
+    # 404 not found - message deleted/doesn't exist, don't retry
+    if status == 404:
+        return False
+    # 400 bad request - our request is malformed, don't retry
+    if status == 400:
+        return False
+    # 403 forbidden - permission issue, don't retry
+    if status == 403:
+        return False
+    # Other 4XX errors - generally client errors, don't retry
+    if 400 <= status < 500:
+        return False
+    # Unknown status - be conservative and retry
+    return True
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -861,8 +893,27 @@ class GmailSync:
         self, message: pubsub_v1.subscriber.message.Message
     ) -> None:
         """Internal notification processor with retry logic."""
+
+        def process_with_error_classification() -> None:
+            """Wrapper that catches HttpError and checks if retryable."""
+            try:
+                self._process_notification_inner(message)
+            except HttpError as e:
+                # Check if this HttpError should be retried
+                if is_retryable_http_error(e):
+                    # Re-raise so retry logic can handle it
+                    raise
+                else:
+                    # Non-retryable error (404, 400, 403, etc.) - log and skip
+                    logger.warning(
+                        f"Non-retryable Gmail API error {e.resp.status}: {e}"
+                    )
+                    # Don't re-raise - treat as successful processing
+                    return
+
+        # Only retry truly transient errors
         retryable_exceptions = (
-            HttpError,
+            HttpError,  # Will be filtered by process_with_error_classification
             psycopg2.Error,
             urllib.error.URLError,
             TimeoutError,
@@ -872,7 +923,7 @@ class GmailSync:
 
         try:
             retry_with_backoff(
-                lambda: self._process_notification_inner(message),
+                process_with_error_classification,
                 config=self._backoff_config,
                 retryable_exceptions=retryable_exceptions,
             )

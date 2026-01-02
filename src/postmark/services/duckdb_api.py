@@ -495,7 +495,12 @@ def get_body(
         )
 
     # Deserialize JSON parts for cleaner API response
-    parts_data = json.loads(result[0]) if result[0] else None
+    try:
+        parts_data = json.loads(result[0]) if result[0] else None
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.warning(f"Failed to parse parts JSON for {gmail_id}: {e}")
+        parts_data = None
+
     # Extract decoded body text from parts (with body_data fallback)
     body_text = _extract_body_text(parts_data, result[1])
     return BodyResponse(
@@ -533,7 +538,12 @@ def get_mail_text(
             status_code=404, detail=f"No body found for gmail_id: {gmail_id}"
         )
 
-    parts_data = json.loads(result[0]) if result[0] else None
+    try:
+        parts_data = json.loads(result[0]) if result[0] else None
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.warning(f"Failed to parse parts JSON for {gmail_id}: {e}")
+        parts_data = None
+
     text = _extract_body_text(parts_data, result[1])
     return MailTextResponse(gmail_id=gmail_id, text=text)
 
@@ -560,7 +570,12 @@ def get_bodies(
     # Deserialize JSON parts and extract body text (with body_data fallback)
     bodies: dict[str, BodyDetails] = {}
     for row in rows:
-        parts_data = json.loads(row[1]) if row[1] else None
+        try:
+            parts_data = json.loads(row[1]) if row[1] else None
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning(f"Failed to parse parts JSON for {row[0]}: {e}")
+            parts_data = None
+
         bodies[row[0]] = BodyDetails(
             parts=parts_data,
             body_data=row[2],
