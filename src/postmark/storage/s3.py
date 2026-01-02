@@ -28,29 +28,13 @@ class S3Client:
 
     def _create_bucket_if_missing(self) -> None:
         try:
-            self.s3.meta.client.head_bucket(Bucket=self.bucket_name)
+            self.s3.create_bucket(Bucket=self.bucket_name)
         except ClientError as e:
-            # Bucket doesn't exist, try to create it
-            error_code = e.response.get("Error", {}).get("Code", "")
-            if error_code == "404":
-                try:
-                    self.s3.create_bucket(Bucket=self.bucket_name)
-                except ClientError as create_error:
-                    # Handle race condition: another worker created the bucket
-                    create_error_code = create_error.response.get("Error", {}).get(
-                        "Code", ""
-                    )
-                    if create_error_code in (
-                        "BucketAlreadyExists",
-                        "BucketAlreadyOwnedByYou",
-                    ):
-                        # Bucket exists now, this is fine
-                        pass
-                    else:
-                        # Unexpected error, re-raise
-                        raise
-            else:
-                # Unexpected error from head_bucket, re-raise
+            error_code = e.response.get("Error", {}).get("Code")
+            if error_code not in (
+                "BucketAlreadyExists",
+                "BucketAlreadyOwnedByYou",
+            ):
                 raise
 
     def put_bytes(self, key: str, data: bytes) -> None:
