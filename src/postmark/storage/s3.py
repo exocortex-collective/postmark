@@ -31,10 +31,7 @@ class S3Client:
             self.s3.create_bucket(Bucket=self.bucket_name)
         except ClientError as e:
             error_code = e.response.get("Error", {}).get("Code")
-            if error_code not in (
-                "BucketAlreadyExists",
-                "BucketAlreadyOwnedByYou",
-            ):
+            if error_code != "BucketAlreadyOwnedByYou":
                 raise
 
     def put_bytes(self, key: str, data: bytes) -> None:

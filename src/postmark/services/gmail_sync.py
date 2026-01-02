@@ -896,7 +896,8 @@ class GmailSync:
                     logger.warning(
                         f"Non-retryable Gmail API error {e.resp.status}: {e}"
                     )
-                    # Don't re-raise - treat as successful processing
+                    # Acknowledge message to prevent redelivery
+                    message.ack()
                     return
 
         # Only retry truly transient errors
