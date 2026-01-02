@@ -46,7 +46,8 @@ def get_gmail_ids_in_postgres(pg_conn: Any) -> set[str]:
 def get_gmail_ids_in_duckdb(api_url: str) -> set[str]:
     """Get all gmail_ids from DuckDB via API."""
     try:
-        url = f"{api_url}/gmail_ids"
+        # Explicitly request all IDs (limit=0) for backfill comparison
+        url = f"{api_url}/gmail_ids?limit=0"
         with urllib.request.urlopen(url, timeout=30) as resp:
             data = json.loads(resp.read().decode())
             return set(data.get("gmail_ids", []))
