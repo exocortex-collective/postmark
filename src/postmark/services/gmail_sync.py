@@ -66,20 +66,17 @@ def is_retryable_http_error(error: HttpError) -> bool:
     Retryable: 5XX server errors, 429 rate limit, 503 service unavailable
     Non-retryable: 404 not found, 400 bad request, 403 forbidden
     """
-    if not isinstance(error, HttpError):
-        return True  # Not an HttpError, let caller decide
-
     status = error.resp.status
-    # 5XX errors are transient server issues - retry
-    if status >= 500:
+
+    # 5XX errors (server-side) and 429 (rate limiting) are retryable.
+    if status >= 500 or status == 429:
         return True
-    # 429 is a special client error that is retryable (rate limit)
-    if status == 429:
-        return True
-    # Other 4XX errors are client-side and generally not retryable
+
+    # Other 4XX errors (client-side) are not retryable.
     if 400 <= status < 500:
         return False
-    # For any other status, be conservative and retry
+
+    # For any other status, be conservative and retry.
     return True
 
 
