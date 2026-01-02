@@ -169,6 +169,17 @@ def _looks_like_html(text: str) -> bool:
     return len(tags) >= 3 and indicator_count >= 2
 
 
+def _safe_json_loads(data: str | None, context_id: str) -> Any | None:
+    """Safely load JSON, logging errors and returning None on failure."""
+    if not data:
+        return None
+    try:
+        return json.loads(data)
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.warning(f"Failed to parse parts JSON for {context_id}: {e}")
+        return None
+
+
 def _extract_body_text(parts: Any, body_data: str | None = None) -> str | None:
     """Extract text body from Gmail message parts (markdown format).
 
@@ -495,7 +506,8 @@ def get_body(
         )
 
     # Deserialize JSON parts for cleaner API response
-    parts_data = json.loads(result[0]) if result[0] else None
+    parts_data = _safe_json_loads(result[0], gmail_id)
+
     # Extract decoded body text from parts (with body_data fallback)
     body_text = _extract_body_text(parts_data, result[1])
     return BodyResponse(
@@ -533,7 +545,7 @@ def get_mail_text(
             status_code=404, detail=f"No body found for gmail_id: {gmail_id}"
         )
 
-    parts_data = json.loads(result[0]) if result[0] else None
+    parts_data = _safe_json_loads(result[0], gmail_id)
     text = _extract_body_text(parts_data, result[1])
     return MailTextResponse(gmail_id=gmail_id, text=text)
 
@@ -560,7 +572,7 @@ def get_bodies(
     # Deserialize JSON parts and extract body text (with body_data fallback)
     bodies: dict[str, BodyDetails] = {}
     for row in rows:
-        parts_data = json.loads(row[1]) if row[1] else None
+        parts_data = _safe_json_loads(row[1], row[0])
         bodies[row[0]] = BodyDetails(
             parts=parts_data,
             body_data=row[2],

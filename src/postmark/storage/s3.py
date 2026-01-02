@@ -28,9 +28,11 @@ class S3Client:
 
     def _create_bucket_if_missing(self) -> None:
         try:
-            self.s3.meta.client.head_bucket(Bucket=self.bucket_name)
-        except ClientError:
             self.s3.create_bucket(Bucket=self.bucket_name)
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code")
+            if error_code != "BucketAlreadyOwnedByYou":
+                raise
 
     def put_bytes(self, key: str, data: bytes) -> None:
         obj = self.s3.Object(self.bucket_name, key)
