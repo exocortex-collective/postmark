@@ -133,11 +133,14 @@ def test_gmail_ids_pagination(populated_db_client):
 
 
 def test_gmail_ids_unlimited_with_offset(populated_db_client):
-    """Test /gmail_ids with limit=0 (unlimited) respects offset parameter."""
+    """Test /gmail_ids with limit=0 (unlimited) respects offset and returns sorted results."""
     # Get all IDs from the beginning
     response_all = populated_db_client.get("/gmail_ids", params={"limit": 0})
     assert response_all.status_code == 200
     all_ids = response_all.json()["gmail_ids"]
+
+    # Results should be ordered by gmail_id
+    assert all_ids == sorted(all_ids)
 
     # Get all IDs starting from offset 10
     response_offset = populated_db_client.get(
@@ -149,8 +152,24 @@ def test_gmail_ids_unlimited_with_offset(populated_db_client):
     # Should get 5 IDs (15 total - 10 offset)
     assert len(offset_ids) == 5
 
-    # The offset IDs should match the last 5 from all IDs
+    # The offset IDs should match the last 5 from all IDs (and be sorted)
     assert offset_ids == all_ids[10:]
+    assert offset_ids == sorted(offset_ids)
+
+    # Verify deterministic results - expected sorted IDs based on fixture
+    expected_ids = [f"test{i:03d}" for i in range(10, 15)]
+    assert offset_ids == expected_ids
+
+
+def test_gmail_ids_negative_params_rejected(client):
+    """Test /gmail_ids rejects negative limit and offset parameters."""
+    # Negative limit should return 422 Unprocessable Entity
+    response = client.get("/gmail_ids", params={"limit": -1})
+    assert response.status_code == 422
+
+    # Negative offset should return 422
+    response = client.get("/gmail_ids", params={"offset": -1})
+    assert response.status_code == 422
 
 
 def test_body_not_found(client):

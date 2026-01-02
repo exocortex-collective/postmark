@@ -439,42 +439,39 @@ def get_gmail_ids(
     limit: int
     | None = Query(
         default=None,
+        ge=0,
         description="Max IDs to return. Defaults to 10000 to prevent OOM. Use 0 for unlimited (not recommended for large mailboxes).",
     ),
-    offset: int = Query(0, description="Number of IDs to skip"),
+    offset: int = Query(0, ge=0, description="Number of IDs to skip"),
 ) -> GmailIdsResponse:
     """Get gmail_ids stored in DuckDB (for backfill comparison).
 
     Supports pagination via limit/offset for large datasets.
     Default limit is 10000 to prevent OOM on large mailboxes.
     Set limit=0 explicitly to retrieve all IDs (may cause memory issues).
+
+    Results are ordered by gmail_id for deterministic pagination.
     """
-    # Use default limit if not specified
-    if limit is None:
-        limit = GMAIL_IDS_DEFAULT_LIMIT
+    # Use default limit if not specified, but allow 0 for unlimited
+    final_limit = GMAIL_IDS_DEFAULT_LIMIT if limit is None else limit
 
     with _lock:
         conn = get_connection()
-        if limit > 0:
-            rows = _execute_query(
-                conn,
-                "SELECT gmail_id FROM email_bodies LIMIT ? OFFSET ?",
-                [limit, offset],
-                operation="read",
-            )
-        else:
-            # For limit=0 (unlimited), we should still respect the offset
-            if offset > 0:
-                rows = _execute_query(
-                    conn,
-                    "SELECT gmail_id FROM email_bodies OFFSET ?",
-                    [offset],
-                    operation="read",
-                )
-            else:
-                rows = _execute_query(
-                    conn, "SELECT gmail_id FROM email_bodies", operation="read"
-                )
+
+        # Build query dynamically with ORDER BY for deterministic pagination
+        sql = "SELECT gmail_id FROM email_bodies ORDER BY gmail_id"
+        params: list[int] = []
+
+        if final_limit > 0:
+            sql += " LIMIT ?"
+            params.append(final_limit)
+
+        if offset > 0:
+            sql += " OFFSET ?"
+            params.append(offset)
+
+        rows = _execute_query(conn, sql, params, operation="read")
+
     gmail_ids = [row[0] for row in rows.fetchall()]
     return GmailIdsResponse(gmail_ids=gmail_ids, count=len(gmail_ids))
 
