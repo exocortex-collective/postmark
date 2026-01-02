@@ -219,6 +219,11 @@ class GmailSync:
             dbname=pg.dbname,
             user=pg.user,
             password=pg.password,
+            # TCP keepalive settings to prevent stale connections
+            keepalives=1,  # Enable TCP keepalives
+            keepalives_idle=30,  # Seconds before starting keepalives
+            keepalives_interval=10,  # Seconds between keepalive probes
+            keepalives_count=5,  # Number of lost keepalives before disconnect
         )
         # Ensure schema exists using a connection from the pool
         with self._get_conn() as conn:
@@ -228,10 +233,30 @@ class GmailSync:
 
     @contextmanager
     def _get_conn(self) -> Iterator[psycopg2.extensions.connection]:
-        """Get a connection from the pool. Auto-returns on exit."""
+        """Get a connection from the pool. Auto-returns on exit.
+
+        Validates the connection before use to detect stale/closed connections.
+        If validation fails, discards the connection and gets a fresh one.
+        """
         conn = self._pool.getconn()
         conn.autocommit = False
         try:
+            # Validate connection is alive before use
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            yield conn
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+            # Connection is stale/broken - close it and get a fresh one
+            logger.warning(f"Stale connection detected, getting fresh connection: {e}")
+            try:
+                conn.close()
+            except Exception:
+                pass  # Already broken, ignore close errors
+            self._pool.putconn(conn, close=True)  # Remove from pool
+
+            # Get a fresh connection
+            conn = self._pool.getconn()
+            conn.autocommit = False
             yield conn
         finally:
             self._pool.putconn(conn)

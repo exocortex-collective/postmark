@@ -130,8 +130,9 @@ def _looks_like_html(text: str) -> bool:
     Uses conservative thresholds to avoid false positives:
     - Minimum 50 chars (very short text can't be meaningful HTML)
     - Check first 8KB (some emails have long tracking URLs before HTML content)
-    - Require 3+ HTML tags (avoids false positives like "value < 10" or XML snippets)
-    - Require 2+ HTML-specific indicators (distinguishes from generic angle brackets)
+    - Require 5+ HTML tags (increased from 3 to reduce false positives from XML/code)
+    - Require 2+ email-specific HTML indicators
+    - Exclude patterns that suggest code/XML rather than email HTML
     """
     # Minimum length check - very short text can't be meaningful HTML
     if not text or len(text) < 50:
@@ -144,29 +145,47 @@ def _looks_like_html(text: str) -> bool:
     if "<" not in sample:
         return False
 
-    # Count HTML-like tags (require 3+ to avoid false positives)
-    tags = re.findall(r"<[a-zA-Z][^>]*>", sample)
-    if len(tags) < 3:
+    # Exclude patterns that suggest code/configuration rather than HTML email
+    sample_lower = sample.lower()
+    code_patterns = [
+        "<?xml",  # XML declaration
+        "<configuration>",  # Config files
+        "<project>",  # Maven/build files
+        '{"',  # JSON (not HTML)
+        "{{",  # Template variables
+        "<template>",  # Template files
+    ]
+    if any(pattern in sample_lower for pattern in code_patterns):
         return False
 
-    # Check for HTML-specific patterns (require 2+ indicators)
+    # Count HTML-like tags (require 5+ to avoid false positives from small XML snippets)
+    # This pattern excludes self-closing XML tags and requires proper tag structure
+    tags = re.findall(r"<[a-zA-Z][a-zA-Z0-9]*[^>]*>", sample)
+    if len(tags) < 5:
+        return False
+
+    # Check for email-specific HTML patterns (require 2+ indicators)
+    # Focus on patterns unique to HTML emails, not general HTML/XML
     html_indicators = [
-        "<!DOCTYPE",
+        "<!doctype html",
         "<html",
+        "<head>",
         "<body",
         "<div",
-        "<span",
         "<table",
-        "<p>",
-        "<br",
+        "<tr>",
+        "<td",
+        "cellpadding=",  # Table attributes common in email HTML
+        "cellspacing=",
+        "bgcolor=",
+        'align="center"',  # Email layout patterns
+        'style="',  # Inline styles (common in emails)
         'class="',
-        'style="',
     ]
-    sample_lower = sample.lower()
-    indicator_count = sum(1 for ind in html_indicators if ind.lower() in sample_lower)
+    indicator_count = sum(1 for ind in html_indicators if ind in sample_lower)
 
     # Both conditions must be met to classify as HTML
-    return len(tags) >= 3 and indicator_count >= 2
+    return len(tags) >= 5 and indicator_count >= 2
 
 
 def _safe_json_loads(data: str | None, context_id: str) -> Any | None:
