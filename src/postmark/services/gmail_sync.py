@@ -219,6 +219,11 @@ class GmailSync:
             dbname=pg.dbname,
             user=pg.user,
             password=pg.password,
+            # TCP keepalive settings to prevent stale connections
+            keepalives=1,  # Enable TCP keepalives
+            keepalives_idle=30,  # Seconds before starting keepalives
+            keepalives_interval=10,  # Seconds between keepalive probes
+            keepalives_count=5,  # Number of lost keepalives before disconnect
         )
         # Ensure schema exists using a connection from the pool
         with self._get_conn() as conn:
@@ -228,13 +233,49 @@ class GmailSync:
 
     @contextmanager
     def _get_conn(self) -> Iterator[psycopg2.extensions.connection]:
-        """Get a connection from the pool. Auto-returns on exit."""
-        conn = self._pool.getconn()
-        conn.autocommit = False
-        try:
-            yield conn
-        finally:
-            self._pool.putconn(conn)
+        """Get a connection from the pool. Auto-returns on exit.
+
+        Validates the connection before use to detect stale/closed connections.
+        If validation fails, discards the connection and retries up to 3 times.
+        """
+        max_retries = 3
+        for attempt in range(max_retries):
+            conn = self._pool.getconn()
+            conn.autocommit = False
+            yielded = False
+            try:
+                # Validate connection is alive before use
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                # Connection is good, yield it
+                yield conn
+                yielded = True  # Mark as successfully yielded
+                return  # Success, exit the context manager
+            except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                # Connection is stale/broken
+                logger.warning(
+                    f"Stale connection detected (attempt {attempt + 1}/{max_retries}): {e}"
+                )
+                try:
+                    conn.close()
+                except Exception:
+                    pass  # Already broken, ignore close errors
+                self._pool.putconn(conn, close=True)  # Remove from pool
+
+                if attempt == max_retries - 1:
+                    # Last attempt failed, re-raise the error
+                    raise RuntimeError(
+                        f"Failed to get valid connection after {max_retries} attempts. "
+                        "Check database connectivity and connection pool settings."
+                    ) from e
+                # Otherwise continue to next retry
+            finally:
+                # Only return to pool if not successfully yielded
+                if not yielded:
+                    try:
+                        self._pool.putconn(conn)
+                    except Exception:
+                        pass  # Connection may have been closed already
 
     def _ensure_postgres_schema(self, conn: psycopg2.extensions.connection) -> None:
         """Create tables if they don't exist."""
