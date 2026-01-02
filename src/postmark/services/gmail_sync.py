@@ -242,12 +242,14 @@ class GmailSync:
         for attempt in range(max_retries):
             conn = self._pool.getconn()
             conn.autocommit = False
+            yielded = False
             try:
                 # Validate connection is alive before use
                 with conn.cursor() as cur:
                     cur.execute("SELECT 1")
                 # Connection is good, yield it
                 yield conn
+                yielded = True  # Mark as successfully yielded
                 return  # Success, exit the context manager
             except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
                 # Connection is stale/broken
@@ -263,13 +265,13 @@ class GmailSync:
                 if attempt == max_retries - 1:
                     # Last attempt failed, re-raise the error
                     raise RuntimeError(
-                        f"Failed to get valid connection after {max_retries} attempts"
+                        f"Failed to get valid connection after {max_retries} attempts. "
+                        "Check database connectivity and connection pool settings."
                     ) from e
                 # Otherwise continue to next retry
             finally:
-                # Return connection to pool if we still have it
-                # (won't execute if we already returned successfully)
-                if "conn" in locals():
+                # Only return to pool if not successfully yielded
+                if not yielded:
                     try:
                         self._pool.putconn(conn)
                     except Exception:
