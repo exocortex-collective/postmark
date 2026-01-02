@@ -33,6 +33,34 @@ PORT = int(os.environ.get("DUCKDB_API_PORT", "8081"))
 # Set to 0 to allow unlimited queries by default (not recommended for production)
 GMAIL_IDS_DEFAULT_LIMIT = int(os.environ.get("GMAIL_IDS_DEFAULT_LIMIT", "10000"))
 
+# HTML detection constants - patterns that indicate code rather than HTML email
+_CODE_PATTERNS = (
+    "<?xml",  # XML declaration
+    "<configuration>",  # Config files
+    "<project>",  # Maven/build files
+    '{"',  # JSON (not HTML)
+    "{{",  # Template variables
+    "<template>",  # Template files
+)
+
+# HTML detection constants - email-specific HTML patterns
+_HTML_INDICATORS = (
+    "<!doctype html",
+    "<html",
+    "<head>",
+    "<body",
+    "<div",
+    "<table",
+    "<tr>",
+    "<td",
+    "cellpadding=",  # Table attributes common in email HTML
+    "cellspacing=",
+    "bgcolor=",
+    'align="center"',  # Email layout patterns
+    'style="',  # Inline styles (common in emails)
+    'class="',
+)
+
 
 def _get_or_create_metric(
     metric_class: type,
@@ -147,15 +175,7 @@ def _looks_like_html(text: str) -> bool:
 
     # Exclude patterns that suggest code/configuration rather than HTML email
     sample_lower = sample.lower()
-    code_patterns = [
-        "<?xml",  # XML declaration
-        "<configuration>",  # Config files
-        "<project>",  # Maven/build files
-        '{"',  # JSON (not HTML)
-        "{{",  # Template variables
-        "<template>",  # Template files
-    ]
-    if any(pattern in sample_lower for pattern in code_patterns):
+    if any(pattern in sample_lower for pattern in _CODE_PATTERNS):
         return False
 
     # Count HTML-like tags (require 5+ to avoid false positives from small XML snippets)
@@ -166,23 +186,7 @@ def _looks_like_html(text: str) -> bool:
 
     # Check for email-specific HTML patterns (require 2+ indicators)
     # Focus on patterns unique to HTML emails, not general HTML/XML
-    html_indicators = [
-        "<!doctype html",
-        "<html",
-        "<head>",
-        "<body",
-        "<div",
-        "<table",
-        "<tr>",
-        "<td",
-        "cellpadding=",  # Table attributes common in email HTML
-        "cellspacing=",
-        "bgcolor=",
-        'align="center"',  # Email layout patterns
-        'style="',  # Inline styles (common in emails)
-        'class="',
-    ]
-    indicator_count = sum(1 for ind in html_indicators if ind in sample_lower)
+    indicator_count = sum(1 for ind in _HTML_INDICATORS if ind in sample_lower)
 
     # Both conditions must be met to classify as HTML
     return len(tags) >= 5 and indicator_count >= 2

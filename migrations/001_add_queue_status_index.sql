@@ -7,8 +7,8 @@
 --
 -- Run with:
 --   psql -U cortex -d cortex -f migrations/001_add_queue_status_index.sql
-
-BEGIN;
+--
+-- Note: CREATE INDEX CONCURRENTLY cannot be run inside a transaction block
 
 -- Index for queries that GROUP BY or filter on status
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_queue_status
@@ -16,5 +16,3 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_queue_status
 
 -- Verify index was created
 \di idx_queue_status
-
-COMMIT;
