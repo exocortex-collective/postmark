@@ -73,22 +73,13 @@ def is_retryable_http_error(error: HttpError) -> bool:
     # 5XX errors are transient server issues - retry
     if status >= 500:
         return True
-    # 429 rate limit - retry with backoff
+    # 429 is a special client error that is retryable (rate limit)
     if status == 429:
         return True
-    # 404 not found - message deleted/doesn't exist, don't retry
-    if status == 404:
-        return False
-    # 400 bad request - our request is malformed, don't retry
-    if status == 400:
-        return False
-    # 403 forbidden - permission issue, don't retry
-    if status == 403:
-        return False
-    # Other 4XX errors - generally client errors, don't retry
+    # Other 4XX errors are client-side and generally not retryable
     if 400 <= status < 500:
         return False
-    # Unknown status - be conservative and retry
+    # For any other status, be conservative and retry
     return True
 
 
