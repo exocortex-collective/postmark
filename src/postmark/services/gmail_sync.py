@@ -249,8 +249,17 @@ class GmailSync:
                     cur.execute("SELECT 1")
                 conn.rollback()  # Clean up validation transaction
                 # Connection is good, yield it
-                yield conn
-                yielded = True  # Mark as successfully yielded
+                try:
+                    yield conn
+                    yielded = True  # Mark as successfully yielded
+                finally:
+                    # Auto-rollback any uncommitted transaction before returning to pool
+                    # This prevents connection leaks when callers forget to commit/rollback
+                    if yielded:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass  # Connection may be closed or in error state
                 return  # Success, exit the context manager
             except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
                 # Connection is stale/broken
