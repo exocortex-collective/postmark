@@ -247,6 +247,7 @@ class GmailSync:
                 # Validate connection is alive before use
                 with conn.cursor() as cur:
                     cur.execute("SELECT 1")
+                conn.rollback()  # Clean up validation transaction
                 # Connection is good, yield it
                 yield conn
                 yielded = True  # Mark as successfully yielded
