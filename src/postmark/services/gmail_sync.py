@@ -260,6 +260,8 @@ class GmailSync:
                             conn.rollback()
                         except Exception:
                             pass  # Connection may be closed or in error state
+                        # Return connection to pool
+                        self._pool.putconn(conn)
                 return  # Success, exit the context manager
             except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
                 # Connection is stale/broken
