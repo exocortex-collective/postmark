@@ -322,13 +322,14 @@ wheels = [
 [[package]]
 name = "cortex-utils"
 version = "0.1.0"
-source = { git = "https://github.com/devonjones/cortex-utils.git?rev=7c3d796a1252e719217151b75f255f74a29a9fa3#7c3d796a1252e719217151b75f255f74a29a9fa3" }
+source = { git = "https://github.com/devonjones/cortex-utils.git?rev=26cb7d6#26cb7d625dfe085feaaa716b2bbc480d1cbbb3b5" }
 dependencies = [
     { name = "click" },
     { name = "docker" },
     { name = "httpx" },
     { name = "prometheus-client" },
     { name = "psycopg2-binary" },
+    { name = "pydantic" },
     { name = "pyyaml" },
     { name = "schedule" },
     { name = "structlog" },
@@ -1410,7 +1411,7 @@ requires-dist = [
     { name = "boto3", specifier = ">=1.26.0" },
     { name = "charset-normalizer", specifier = ">=3.0.0" },
     { name = "click", specifier = ">=8.0.0" },
-    { name = "cortex-utils", git = "https://github.com/devonjones/cortex-utils.git?rev=7c3d796a1252e719217151b75f255f74a29a9fa3" },
+    { name = "cortex-utils", git = "https://github.com/devonjones/cortex-utils.git?rev=26cb7d6" },
     { name = "duckdb", specifier = ">=0.9.0" },
     { name = "fastapi", specifier = ">=0.100.0" },
     { name = "google-api-python-client", specifier = ">=2.0.0" },
