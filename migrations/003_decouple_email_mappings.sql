@@ -45,7 +45,7 @@ CREATE INDEX idx_email_mappings_email_v2 ON triage_email_mappings_v2(email_addre
 -- 2. Create history table for audit trail
 CREATE TABLE IF NOT EXISTS triage_email_mappings_history (
     id BIGSERIAL PRIMARY KEY,
-    mapping_id BIGINT,  -- References the mapping that was changed
+    mapping_id BIGINT NOT NULL,  -- References the mapping that was changed
 
     -- Snapshot of mapping at this point
     mapping_type TEXT NOT NULL,
@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS triage_email_mappings_history (
     changed_by TEXT NOT NULL,
 
     -- Previous values (for update/delete operations)
+    previous_mapping_type TEXT,
+    previous_email_address TEXT,
     previous_label TEXT,
     previous_archive BOOLEAN,
     previous_mark_read BOOLEAN
@@ -87,7 +89,9 @@ BEGIN
 
     ELSIF TG_OP = 'UPDATE' THEN
         -- Only log if something actually changed (not just timestamp updates)
-        IF (OLD.label IS DISTINCT FROM NEW.label) OR
+        IF (OLD.mapping_type IS DISTINCT FROM NEW.mapping_type) OR
+           (OLD.email_address IS DISTINCT FROM NEW.email_address) OR
+           (OLD.label IS DISTINCT FROM NEW.label) OR
            (OLD.archive IS DISTINCT FROM NEW.archive) OR
            (OLD.mark_read IS DISTINCT FROM NEW.mark_read) OR
            (OLD.deleted_at IS DISTINCT FROM NEW.deleted_at) THEN
@@ -95,12 +99,12 @@ BEGIN
             INSERT INTO triage_email_mappings_history (
                 mapping_id, mapping_type, email_address, label, archive, mark_read,
                 change_type, changed_by,
-                previous_label, previous_archive, previous_mark_read
+                previous_mapping_type, previous_email_address, previous_label, previous_archive, previous_mark_read
             ) VALUES (
                 NEW.id, NEW.mapping_type, NEW.email_address, NEW.label, NEW.archive, NEW.mark_read,
                 CASE WHEN OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL THEN 'deleted' ELSE 'updated' END,
                 COALESCE(NEW.updated_by, NEW.created_by, 'unknown'),
-                OLD.label, OLD.archive, OLD.mark_read
+                OLD.mapping_type, OLD.email_address, OLD.label, OLD.archive, OLD.mark_read
             );
         END IF;
         RETURN NEW;
