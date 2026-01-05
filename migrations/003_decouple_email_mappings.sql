@@ -169,7 +169,6 @@ ALTER TABLE triage_email_mappings_v2 RENAME TO triage_email_mappings;
 -- Drop old indexes and constraints from old table (if they exist)
 DROP INDEX IF EXISTS idx_email_mappings_type;
 DROP INDEX IF EXISTS idx_email_mappings_lookup;
-DROP INDEX IF EXISTS idx_email_mappings_email;
 ALTER TABLE IF EXISTS triage_email_mappings_old DROP CONSTRAINT IF EXISTS unique_email_mapping;
 
 -- Rename constraints and indexes to match new table name

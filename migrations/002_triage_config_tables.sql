@@ -12,7 +12,7 @@ CREATE EXTENSION IF NOT EXISTS btree_gist;
 
 CREATE TABLE IF NOT EXISTS triage_config_versions (
     id BIGSERIAL PRIMARY KEY,
-    version INTEGER NOT NULL UNIQUE,  -- Auto-assigned via trigger
+    version SERIAL UNIQUE,            -- Auto-assigned via sequence (race-safe)
     config_hash TEXT NOT NULL,        -- SHA256 of YAML content (dedup)
     label_prefix TEXT NOT NULL DEFAULT 'Cortex',
 
@@ -37,24 +37,6 @@ CREATE INDEX IF NOT EXISTS idx_config_versions_active ON triage_config_versions(
     WHERE is_active = TRUE;
 
 CREATE INDEX IF NOT EXISTS idx_config_versions_hash ON triage_config_versions(config_hash);
-
--- Trigger: Auto-assign version number
-CREATE OR REPLACE FUNCTION assign_config_version()
-RETURNS TRIGGER AS $$
-BEGIN
-    IF NEW.version IS NULL THEN
-        SELECT COALESCE(MAX(version), 0) + 1
-        INTO NEW.version
-        FROM triage_config_versions;
-    END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER assign_config_version_trigger
-    BEFORE INSERT ON triage_config_versions
-    FOR EACH ROW
-    EXECUTE FUNCTION assign_config_version();
 
 -- Trigger: Deactivate old configs when new one activates
 CREATE OR REPLACE FUNCTION deactivate_old_configs()
@@ -187,9 +169,9 @@ CREATE TRIGGER increment_rule_version_trigger
 CREATE TABLE IF NOT EXISTS worker_signals (
     id BIGSERIAL PRIMARY KEY,
 
-    signal_type TEXT NOT NULL CHECK (signal_type IN (
-        'config_reload', 'shutdown', 'pause', 'resume', 'log_level'
-    )),
+    signal_type TEXT NOT NULL
+        CONSTRAINT worker_signals_signal_type_check
+        CHECK (signal_type IN ('config_reload', 'shutdown', 'pause', 'resume', 'log_level')),
     target_worker TEXT NOT NULL,  -- 'triage', 'labeling', 'all'
     payload JSONB,
 
