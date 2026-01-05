@@ -81,7 +81,6 @@ CREATE TABLE IF NOT EXISTS triage_email_mappings (
 
 CREATE INDEX IF NOT EXISTS idx_email_mappings_config ON triage_email_mappings(config_version);
 CREATE INDEX IF NOT EXISTS idx_email_mappings_type ON triage_email_mappings(config_version, mapping_type);
-CREATE INDEX IF NOT EXISTS idx_email_mappings_lookup ON triage_email_mappings(config_version, mapping_type, email_address);
 
 -- ============================================================================
 -- 3. Chains
@@ -100,7 +99,6 @@ CREATE TABLE IF NOT EXISTS triage_chains (
 );
 
 CREATE INDEX IF NOT EXISTS idx_chains_config ON triage_chains(config_version);
-CREATE INDEX IF NOT EXISTS idx_chains_name ON triage_chains(config_version, chain_name);
 
 -- ============================================================================
 -- 4. Rules (Linked List Structure)

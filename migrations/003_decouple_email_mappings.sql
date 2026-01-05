@@ -38,9 +38,6 @@ CREATE UNIQUE INDEX idx_email_mappings_unique_active
 CREATE INDEX idx_email_mappings_type_v2 ON triage_email_mappings_v2(mapping_type)
     WHERE deleted_at IS NULL;
 
-CREATE INDEX idx_email_mappings_lookup_v2 ON triage_email_mappings_v2(mapping_type, email_address)
-    WHERE deleted_at IS NULL;
-
 CREATE INDEX idx_email_mappings_email_v2 ON triage_email_mappings_v2(email_address)
     WHERE deleted_at IS NULL;
 
@@ -128,6 +125,7 @@ $$ LANGUAGE plpgsql;
 DO $$
 DECLARE
     active_version INTEGER;
+    migrated_count INTEGER;
 BEGIN
     -- Get active config version
     SELECT version INTO active_version
@@ -153,8 +151,10 @@ BEGIN
         FROM triage_email_mappings
         WHERE config_version = active_version;
 
+        GET DIAGNOSTICS migrated_count = ROW_COUNT;
+
         RAISE NOTICE 'Migrated % mappings from config version %',
-            (SELECT COUNT(*) FROM triage_email_mappings_v2),
+            migrated_count,
             active_version;
     ELSE
         RAISE NOTICE 'No active config version found - skipping data migration';
@@ -168,13 +168,11 @@ ALTER TABLE triage_email_mappings_v2 RENAME TO triage_email_mappings;
 
 -- Drop old indexes and constraints from old table (if they exist)
 DROP INDEX IF EXISTS idx_email_mappings_type;
-DROP INDEX IF EXISTS idx_email_mappings_lookup;
 ALTER TABLE IF EXISTS triage_email_mappings_old DROP CONSTRAINT IF EXISTS unique_email_mapping;
 
 -- Rename constraints and indexes to match new table name
 ALTER INDEX idx_email_mappings_unique_active RENAME TO idx_email_mappings_active;
 ALTER INDEX idx_email_mappings_type_v2 RENAME TO idx_email_mappings_type;
-ALTER INDEX idx_email_mappings_lookup_v2 RENAME TO idx_email_mappings_lookup;
 ALTER INDEX idx_email_mappings_email_v2 RENAME TO idx_email_mappings_email;
 
 
