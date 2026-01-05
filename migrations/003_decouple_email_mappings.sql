@@ -24,14 +24,11 @@ CREATE TABLE IF NOT EXISTS triage_email_mappings_v2 (
     updated_by TEXT,      -- Who last updated
 
     -- Soft delete support
-    deleted_at TIMESTAMPTZ,
-
-    -- Unique constraint per type (excluding soft-deleted)
-    CONSTRAINT unique_email_mapping_v2 UNIQUE (mapping_type, email_address)
+    deleted_at TIMESTAMPTZ
 );
 
 -- Create partial unique index to enforce uniqueness only for non-deleted rows
--- (PostgreSQL doesn't support WHERE clause in UNIQUE constraint with multiple columns)
+-- A partial unique index is used because the table-level UNIQUE constraint syntax does not support a WHERE clause.
 DROP INDEX IF EXISTS idx_email_mappings_unique_active;
 CREATE UNIQUE INDEX idx_email_mappings_unique_active
     ON triage_email_mappings_v2(mapping_type, email_address)
@@ -51,7 +48,7 @@ CREATE INDEX idx_email_mappings_email_v2 ON triage_email_mappings_v2(email_addre
 -- 2. Create history table for audit trail
 CREATE TABLE IF NOT EXISTS triage_email_mappings_history (
     id BIGSERIAL PRIMARY KEY,
-    mapping_id BIGINT,  -- NULL if mapping was deleted
+    mapping_id BIGINT,  -- References the mapping that was changed
 
     -- Snapshot of mapping at this point
     mapping_type TEXT NOT NULL,
@@ -180,9 +177,6 @@ ALTER INDEX idx_email_mappings_unique_active RENAME TO idx_email_mappings_active
 ALTER INDEX idx_email_mappings_type_v2 RENAME TO idx_email_mappings_type;
 ALTER INDEX idx_email_mappings_lookup_v2 RENAME TO idx_email_mappings_lookup;
 ALTER INDEX idx_email_mappings_email_v2 RENAME TO idx_email_mappings_email;
-
--- Update constraint name
-ALTER TABLE triage_email_mappings RENAME CONSTRAINT unique_email_mapping_v2 TO unique_email_mapping;
 
 
 -- 6. Create trigger on new table
