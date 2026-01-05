@@ -158,7 +158,7 @@ CREATE TABLE IF NOT EXISTS triage_rules (
     CONSTRAINT exactly_one_outcome CHECK (
         (action IS NOT NULL)::int +
         (jump_to_chain IS NOT NULL)::int +
-        (return_to_parent = TRUE)::int +
+        (return_to_parent IS TRUE)::int +
         (llm_config IS NOT NULL)::int = 1
     )
 );
