@@ -85,7 +85,7 @@ BEGIN
             NEW.id, NEW.mapping_type, NEW.email_address, NEW.label, NEW.archive, NEW.mark_read,
             'created', COALESCE(NEW.created_by, 'unknown')
         );
-        RETURN NEW;
+        RETURN NULL;
 
     ELSIF TG_OP = 'UPDATE' THEN
         -- Only log if something actually changed (not just timestamp updates)
@@ -107,7 +107,7 @@ BEGIN
                 OLD.mapping_type, OLD.email_address, OLD.label, OLD.archive, OLD.mark_read
             );
         END IF;
-        RETURN NEW;
+        RETURN NULL;
 
     ELSIF TG_OP = 'DELETE' THEN
         INSERT INTO triage_email_mappings_history (
@@ -117,7 +117,7 @@ BEGIN
             OLD.id, OLD.mapping_type, OLD.email_address, OLD.label, OLD.archive, OLD.mark_read,
             'deleted', 'unknown (hard delete)'
         );
-        RETURN OLD;
+        RETURN NULL;
     END IF;
 
     RETURN NULL;
