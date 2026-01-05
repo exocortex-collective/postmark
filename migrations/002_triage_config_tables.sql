@@ -82,6 +82,21 @@ CREATE TABLE IF NOT EXISTS triage_email_mappings (
 CREATE INDEX IF NOT EXISTS idx_email_mappings_config ON triage_email_mappings(config_version);
 CREATE INDEX IF NOT EXISTS idx_email_mappings_type ON triage_email_mappings(config_version, mapping_type);
 
+-- Trigger: Auto-update updated_at timestamp
+CREATE OR REPLACE FUNCTION update_timestamp()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS update_email_mapping_timestamp ON triage_email_mappings;
+CREATE TRIGGER update_email_mapping_timestamp
+    BEFORE UPDATE ON triage_email_mappings
+    FOR EACH ROW
+    EXECUTE FUNCTION update_timestamp();
+
 -- ============================================================================
 -- 3. Chains
 -- ============================================================================
@@ -99,6 +114,13 @@ CREATE TABLE IF NOT EXISTS triage_chains (
 );
 
 CREATE INDEX IF NOT EXISTS idx_chains_config ON triage_chains(config_version);
+
+-- Trigger: Auto-update updated_at timestamp
+DROP TRIGGER IF EXISTS update_chain_timestamp ON triage_chains;
+CREATE TRIGGER update_chain_timestamp
+    BEFORE UPDATE ON triage_chains
+    FOR EACH ROW
+    EXECUTE FUNCTION update_timestamp();
 
 -- ============================================================================
 -- 4. Rules (Linked List Structure)

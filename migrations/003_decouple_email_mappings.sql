@@ -176,7 +176,16 @@ ALTER INDEX idx_email_mappings_type_v2 RENAME TO idx_email_mappings_type;
 ALTER INDEX idx_email_mappings_email_v2 RENAME TO idx_email_mappings_email;
 
 
--- 6. Create trigger on new table
+-- 6. Create triggers on new table
+
+-- Trigger: Auto-update updated_at timestamp
+DROP TRIGGER IF EXISTS update_email_mapping_timestamp ON triage_email_mappings;
+CREATE TRIGGER update_email_mapping_timestamp
+    BEFORE UPDATE ON triage_email_mappings
+    FOR EACH ROW
+    EXECUTE FUNCTION update_timestamp();
+
+-- Trigger: Log changes to history table
 DROP TRIGGER IF EXISTS email_mapping_change_log ON triage_email_mappings;
 CREATE TRIGGER email_mapping_change_log
     AFTER INSERT OR UPDATE OR DELETE ON triage_email_mappings
