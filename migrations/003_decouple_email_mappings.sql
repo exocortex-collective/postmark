@@ -98,7 +98,7 @@ BEGIN
                 previous_label, previous_archive, previous_mark_read
             ) VALUES (
                 NEW.id, NEW.mapping_type, NEW.email_address, NEW.label, NEW.archive, NEW.mark_read,
-                CASE WHEN NEW.deleted_at IS NOT NULL THEN 'deleted' ELSE 'updated' END,
+                CASE WHEN OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL THEN 'deleted' ELSE 'updated' END,
                 COALESCE(NEW.updated_by, NEW.created_by, 'unknown'),
                 OLD.label, OLD.archive, OLD.mark_read
             );
@@ -111,7 +111,7 @@ BEGIN
             change_type, changed_by
         ) VALUES (
             OLD.id, OLD.mapping_type, OLD.email_address, OLD.label, OLD.archive, OLD.mark_read,
-            'deleted', COALESCE(OLD.updated_by, OLD.created_by, 'unknown')
+            'deleted', 'unknown (hard delete)'
         );
         RETURN OLD;
     END IF;
