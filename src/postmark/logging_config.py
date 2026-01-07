@@ -6,6 +6,7 @@ Integrates with stdlib logging to capture third-party library logs.
 
 import logging
 import sys
+from typing import cast
 
 import structlog
 
@@ -25,7 +26,7 @@ def configure_logging(service_name: str, level: str = "INFO") -> None:
     is_tty = sys.stdout.isatty()
 
     # Shared processors for all log entries
-    shared_processors = [
+    shared_processors: list[structlog.types.Processor] = [
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
@@ -81,4 +82,4 @@ def get_logger(name: str | None = None) -> structlog.BoundLogger:
     Returns:
         Configured structlog logger
     """
-    return structlog.get_logger(name)
+    return cast(structlog.BoundLogger, structlog.get_logger(name))
