@@ -274,6 +274,30 @@ class AttachmentWorker:
             ContentType=mime_type,
         )
 
+    def _upload_small_file_direct(
+        self, s3_key: str, gmail_id: str, attachment_id: str, mime_type: str
+    ) -> int:
+        """Fetch and upload small file directly (non-streaming).
+
+        Returns the actual bytes uploaded.
+        """
+        gmail = self._get_gmail_service()
+        att_response = (
+            gmail.users()
+            .messages()
+            .attachments()
+            .get(userId="me", messageId=gmail_id, id=attachment_id)
+            .execute()
+        )
+
+        # Decode base64url data
+        # Gmail API returns base64url without padding - add correct padding
+        raw_data = att_response["data"]
+        data = base64.urlsafe_b64decode(raw_data + "=" * (-len(raw_data) % 4))
+
+        self._upload_small_file(s3_key, data, mime_type)
+        return len(data)
+
     def _upload_large_file_streaming(
         self, s3_key: str, gmail_id: str, attachment_id: str, mime_type: str
     ) -> int:
@@ -360,13 +384,27 @@ class AttachmentWorker:
             return total_bytes
 
         except Exception as e:
-            # Abort multipart upload on error
-            logger.warning("Aborting multipart upload", s3_key=s3_key, error=str(e))
-            s3.abort_multipart_upload(
-                Bucket=self.config.s3_bucket,
-                Key=s3_key,
-                UploadId=upload_id,
+            # Abort multipart upload on error to prevent orphaned parts
+            logger.warning(
+                "Aborting multipart upload due to streaming error",
+                s3_key=s3_key,
+                upload_id=upload_id,
+                error=str(e),
             )
+            try:
+                s3.abort_multipart_upload(
+                    Bucket=self.config.s3_bucket,
+                    Key=s3_key,
+                    UploadId=upload_id,
+                )
+            except Exception as abort_exc:
+                logger.error(
+                    "Failed to abort multipart upload - orphaned parts may remain",
+                    s3_key=s3_key,
+                    upload_id=upload_id,
+                    abort_error=str(abort_exc),
+                )
+            # Always re-raise the original exception
             raise
 
     def process_job(self, job: dict[str, Any]) -> bool:
@@ -417,21 +455,9 @@ class AttachmentWorker:
             size_bytes = metadata["size"]
             if size_bytes < MULTIPART_THRESHOLD_BYTES:
                 # Small file: fetch all at once and use simple upload
-                gmail = self._get_gmail_service()
-                att_response = (
-                    gmail.users()
-                    .messages()
-                    .attachments()
-                    .get(userId="me", messageId=gmail_id, id=attachment_id)
-                    .execute()
+                actual_size = self._upload_small_file_direct(
+                    s3_key, gmail_id, attachment_id, metadata["mime_type"]
                 )
-
-                # Decode base64url data
-                # Gmail API returns base64url without padding - add correct padding
-                raw_data = att_response["data"]
-                data = base64.urlsafe_b64decode(raw_data + "=" * (-len(raw_data) % 4))
-
-                actual_size = len(data)
                 if actual_size != size_bytes:
                     logger.warning(
                         "Attachment size mismatch for small file",
@@ -441,7 +467,6 @@ class AttachmentWorker:
                         gmail_id=gmail_id,
                     )
 
-                self._upload_small_file(s3_key, data, metadata["mime_type"])
                 logger.info(
                     "Stored small attachment",
                     s3_key=s3_key,
