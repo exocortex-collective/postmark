@@ -328,23 +328,24 @@ class AttachmentWorker:
 
                 # Upload when we have enough data or this is the last chunk
                 if part_buffer.tell() >= MULTIPART_PART_SIZE or done:
-                    part_data = part_buffer.getvalue()
-
-                    if len(part_data) > 0:
+                    if part_buffer.tell() > 0:
+                        # Pass BytesIO directly to avoid memory copy from getvalue()
+                        part_buffer.seek(0)
                         response = s3.upload_part(
                             Bucket=self.config.s3_bucket,
                             Key=s3_key,
                             PartNumber=part_number,
                             UploadId=upload_id,
-                            Body=part_data,
+                            Body=part_buffer,
                         )
                         parts.append(
                             {"PartNumber": part_number, "ETag": response["ETag"]}
                         )
                         part_number += 1
 
-                    # Reset part buffer
-                    part_buffer = io.BytesIO()
+                    # Reset part buffer for next part, avoiding reallocation
+                    part_buffer.seek(0)
+                    part_buffer.truncate(0)
 
             # Complete multipart upload
             s3.complete_multipart_upload(

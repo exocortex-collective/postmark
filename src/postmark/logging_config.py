@@ -1,6 +1,7 @@
 """Structured logging configuration for postmark services.
 
 Sets up structlog with JSON output for production, pretty console output for dev.
+Integrates with stdlib logging to capture third-party library logs.
 """
 
 import logging
@@ -12,52 +13,63 @@ import structlog
 def configure_logging(service_name: str, level: str = "INFO") -> None:
     """Configure structured logging for a service.
 
+    Integrates structlog with Python's standard logging to ensure all logs
+    (including from third-party libraries like boto3, googleapiclient) are
+    formatted as structured JSON in production.
+
     Args:
         service_name: Name of the service (e.g., 'gmail-sync', 'attachment-worker')
         level: Log level ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
     """
-    # Configure standard logging to output through structlog
-    logging.basicConfig(
-        format="%(message)s",
-        stream=sys.stdout,
-        level=getattr(logging, level.upper()),
-    )
-
-    # Determine if we're in a TTY (development) or not (production)
+    log_level = getattr(logging, level.upper())
     is_tty = sys.stdout.isatty()
 
     # Shared processors for all log entries
     shared_processors = [
         structlog.contextvars.merge_contextvars,
-        structlog.processors.add_log_level,
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
-        structlog.processors.StackInfoRenderer(),
     ]
+
+    # Configure structlog to integrate with stdlib logging
+    structlog.configure(
+        processors=shared_processors
+        + [
+            structlog.stdlib.PositionalArgumentsFormatter(),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+        ],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
+    )
+
+    # Choose renderer based on environment
+    renderer: structlog.types.Processor = (
+        structlog.dev.ConsoleRenderer()
+        if is_tty
+        else structlog.processors.JSONRenderer()
+    )
+
+    # Create formatter that processes logs from stdlib logging
+    formatter = structlog.stdlib.ProcessorFormatter(
+        foreign_pre_chain=shared_processors,
+        processor=renderer,
+    )
+
+    # Configure stdlib logging to use structlog formatter
+    handler = logging.StreamHandler()
+    handler.setFormatter(formatter)
+    root_logger = logging.getLogger()
+    if root_logger.hasHandlers():
+        root_logger.handlers.clear()
+    root_logger.addHandler(handler)
+    root_logger.setLevel(log_level)
 
     # Add service name to all log entries
     structlog.contextvars.bind_contextvars(service=service_name)
-
-    if is_tty:
-        # Pretty console output for development
-        processors = shared_processors + [
-            structlog.dev.ConsoleRenderer(),
-        ]
-    else:
-        # JSON output for production (parsed by log aggregators)
-        processors = shared_processors + [
-            structlog.processors.format_exc_info,
-            structlog.processors.JSONRenderer(),
-        ]
-
-    structlog.configure(
-        processors=processors,
-        wrapper_class=structlog.make_filtering_bound_logger(
-            getattr(logging, level.upper())
-        ),
-        context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(),
-        cache_logger_on_first_use=True,
-    )
 
 
 def get_logger(name: str | None = None) -> structlog.BoundLogger:
