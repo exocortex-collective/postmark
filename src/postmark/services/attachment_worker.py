@@ -301,59 +301,61 @@ class AttachmentWorker:
                 .get_media(userId="me", messageId=gmail_id, id=attachment_id)
             )
 
-            # Stream download in chunks
-            buffer = io.BytesIO()
-            downloader = MediaIoBaseDownload(
-                buffer, request, chunksize=DOWNLOAD_CHUNK_SIZE
-            )
+            # Stream download in chunks using context managers for proper cleanup
+            with io.BytesIO() as buffer:
+                downloader = MediaIoBaseDownload(
+                    buffer, request, chunksize=DOWNLOAD_CHUNK_SIZE
+                )
 
-            parts = []
-            part_number = 1
-            total_bytes = 0
-            part_buffer = io.BytesIO()
+                parts = []
+                part_number = 1
+                total_bytes = 0
+                with io.BytesIO() as part_buffer:
+                    done = False
+                    while not done:
+                        _, done = downloader.next_chunk()
 
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
+                        # Read downloaded chunk from buffer
+                        buffer.seek(0)
+                        chunk_data = buffer.read()
+                        buffer.seek(0)
+                        buffer.truncate(0)
 
-                # Read downloaded chunk from buffer
-                buffer.seek(0)
-                chunk_data = buffer.read()
-                buffer.seek(0)
-                buffer.truncate(0)
+                        # Accumulate chunks into parts for multipart upload
+                        part_buffer.write(chunk_data)
+                        total_bytes += len(chunk_data)
 
-                # Accumulate chunks into parts for multipart upload
-                part_buffer.write(chunk_data)
-                total_bytes += len(chunk_data)
+                        # Upload when we have enough data or this is the last chunk
+                        if part_buffer.tell() >= MULTIPART_PART_SIZE or done:
+                            if part_buffer.tell() > 0:
+                                # Pass BytesIO directly to avoid memory copy from getvalue()
+                                part_buffer.seek(0)
+                                response = s3.upload_part(
+                                    Bucket=self.config.s3_bucket,
+                                    Key=s3_key,
+                                    PartNumber=part_number,
+                                    UploadId=upload_id,
+                                    Body=part_buffer,
+                                )
+                                parts.append(
+                                    {
+                                        "PartNumber": part_number,
+                                        "ETag": response["ETag"],
+                                    }
+                                )
+                                part_number += 1
 
-                # Upload when we have enough data or this is the last chunk
-                if part_buffer.tell() >= MULTIPART_PART_SIZE or done:
-                    if part_buffer.tell() > 0:
-                        # Pass BytesIO directly to avoid memory copy from getvalue()
-                        part_buffer.seek(0)
-                        response = s3.upload_part(
-                            Bucket=self.config.s3_bucket,
-                            Key=s3_key,
-                            PartNumber=part_number,
-                            UploadId=upload_id,
-                            Body=part_buffer,
-                        )
-                        parts.append(
-                            {"PartNumber": part_number, "ETag": response["ETag"]}
-                        )
-                        part_number += 1
+                            # Reset part buffer for next part, avoiding reallocation
+                            part_buffer.seek(0)
+                            part_buffer.truncate(0)
 
-                    # Reset part buffer for next part, avoiding reallocation
-                    part_buffer.seek(0)
-                    part_buffer.truncate(0)
-
-            # Complete multipart upload
-            s3.complete_multipart_upload(
-                Bucket=self.config.s3_bucket,
-                Key=s3_key,
-                UploadId=upload_id,
-                MultipartUpload={"Parts": parts},
-            )
+                    # Complete multipart upload
+                    s3.complete_multipart_upload(
+                        Bucket=self.config.s3_bucket,
+                        Key=s3_key,
+                        UploadId=upload_id,
+                        MultipartUpload={"Parts": parts},
+                    )
 
             return total_bytes
 
@@ -523,6 +525,7 @@ class AttachmentWorker:
                 gmail_id=gmail_id,
                 attachment_id=attachment_id,
                 error=str(e),
+                exc_info=True,
             )
             self._fail_job(job["id"], str(e))
             return False
