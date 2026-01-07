@@ -314,7 +314,7 @@ class AttachmentWorker:
 
             done = False
             while not done:
-                status, done = downloader.next_chunk()
+                _, done = downloader.next_chunk()
 
                 # Read downloaded chunk from buffer
                 buffer.seek(0)
@@ -429,8 +429,17 @@ class AttachmentWorker:
                 raw_data = att_response["data"]
                 data = base64.urlsafe_b64decode(raw_data + "=" * (-len(raw_data) % 4))
 
-                self._upload_small_file(s3_key, data, metadata["mime_type"])
                 actual_size = len(data)
+                if actual_size != size_bytes:
+                    logger.warning(
+                        "Attachment size mismatch for small file",
+                        s3_key=s3_key,
+                        expected_size=size_bytes,
+                        actual_size=actual_size,
+                        gmail_id=gmail_id,
+                    )
+
+                self._upload_small_file(s3_key, data, metadata["mime_type"])
                 logger.info(
                     "Stored small attachment",
                     s3_key=s3_key,
@@ -449,6 +458,15 @@ class AttachmentWorker:
                 actual_size = self._upload_large_file_streaming(
                     s3_key, gmail_id, attachment_id, metadata["mime_type"]
                 )
+                if actual_size != size_bytes:
+                    logger.warning(
+                        "Attachment size mismatch for large file",
+                        s3_key=s3_key,
+                        expected_size=size_bytes,
+                        actual_size=actual_size,
+                        gmail_id=gmail_id,
+                    )
+
                 logger.info(
                     "Stored large attachment",
                     s3_key=s3_key,
