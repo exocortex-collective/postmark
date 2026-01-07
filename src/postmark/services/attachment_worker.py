@@ -4,8 +4,8 @@
 import argparse
 import base64
 import hashlib
+import io
 import json
-import logging
 import os
 import signal
 import sys
@@ -26,18 +26,26 @@ from cortex_utils.metrics import (
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaIoBaseDownload
 
+from postmark.logging_config import configure_logging, get_logger
 from postmark.reliability import GracefulShutdown
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # How long a job can be in 'processing' before it's considered stale
 # and reset to 'pending' (visibility timeout)
 VISIBILITY_TIMEOUT_MINUTES = 5
+
+# S3 multipart upload threshold (use multipart for files > 10MB)
+# AWS best practice is 10MB, reduces memory usage for large files
+MULTIPART_THRESHOLD_BYTES = 10 * 1024 * 1024  # 10MB
+
+# Download chunk size for streaming (1MB chunks)
+DOWNLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB
+
+# S3 multipart upload part size (5MB minimum per AWS requirements)
+MULTIPART_PART_SIZE = 5 * 1024 * 1024  # 5MB
 
 
 @dataclass
@@ -91,7 +99,7 @@ class AttachmentWorker:
             except ClientError as e:
                 # 404 means bucket doesn't exist, other errors should propagate
                 if e.response.get("Error", {}).get("Code") == "404":
-                    logger.info(f"Creating bucket: {self.config.s3_bucket}")
+                    logger.info("Creating S3 bucket", bucket=self.config.s3_bucket)
                     self._s3_client.create_bucket(Bucket=self.config.s3_bucket)
                 else:
                     raise
@@ -104,7 +112,8 @@ class AttachmentWorker:
                     token_data = json.load(f)
             except FileNotFoundError:
                 logger.critical(
-                    f"Gmail token file not found at: {self.config.gmail_token_path}"
+                    "Gmail token file not found",
+                    token_path=self.config.gmail_token_path,
                 )
                 raise
             creds = Credentials(
@@ -145,7 +154,7 @@ class AttachmentWorker:
             """
             )
             conn.commit()
-        logger.info("attachments schema ensured")
+        logger.info("Attachments schema ensured")
 
     def _claim_jobs(self, batch_size: int) -> list[dict[str, Any]]:
         """Claim a batch of pending attachment jobs.
@@ -255,6 +264,151 @@ class AttachmentWorker:
             )
             conn.commit()
 
+    def _upload_small_file(self, s3_key: str, data: bytes, mime_type: str) -> None:
+        """Upload small file using simple put_object."""
+        s3 = self._get_s3_client()
+        s3.put_object(
+            Bucket=self.config.s3_bucket,
+            Key=s3_key,
+            Body=data,
+            ContentType=mime_type,
+        )
+
+    def _upload_small_file_direct(
+        self, s3_key: str, gmail_id: str, attachment_id: str, mime_type: str
+    ) -> int:
+        """Fetch and upload small file directly (non-streaming).
+
+        Returns the actual bytes uploaded.
+        """
+        gmail = self._get_gmail_service()
+        att_response = (
+            gmail.users()
+            .messages()
+            .attachments()
+            .get(userId="me", messageId=gmail_id, id=attachment_id)
+            .execute()
+        )
+
+        # Decode base64url data
+        # Gmail API returns base64url without padding - add correct padding
+        raw_data = att_response["data"]
+        data = base64.urlsafe_b64decode(raw_data + "=" * (-len(raw_data) % 4))
+
+        self._upload_small_file(s3_key, data, mime_type)
+        return len(data)
+
+    def _upload_large_file_streaming(
+        self, s3_key: str, gmail_id: str, attachment_id: str, mime_type: str
+    ) -> int:
+        """Stream large file from Gmail to S3 using multipart upload.
+
+        Returns the total bytes uploaded.
+        """
+        s3 = self._get_s3_client()
+        gmail = self._get_gmail_service()
+
+        upload_id = None
+        try:
+            # Initiate multipart upload
+            multipart = s3.create_multipart_upload(
+                Bucket=self.config.s3_bucket,
+                Key=s3_key,
+                ContentType=mime_type,
+            )
+            upload_id = multipart["UploadId"]
+
+            # Get attachment as media request for streaming
+            request = (
+                gmail.users()
+                .messages()
+                .attachments()
+                .get_media(userId="me", messageId=gmail_id, id=attachment_id)
+            )
+
+            # Stream download in chunks using context managers for proper cleanup
+            with io.BytesIO() as buffer:
+                downloader = MediaIoBaseDownload(
+                    buffer, request, chunksize=DOWNLOAD_CHUNK_SIZE
+                )
+
+                parts = []
+                part_number = 1
+                total_bytes = 0
+                with io.BytesIO() as part_buffer:
+                    done = False
+                    while not done:
+                        _, done = downloader.next_chunk()
+
+                        # Read downloaded chunk from buffer
+                        buffer.seek(0)
+                        chunk_data = buffer.read()
+                        buffer.seek(0)
+                        buffer.truncate(0)
+
+                        # Accumulate chunks into parts for multipart upload
+                        part_buffer.write(chunk_data)
+                        total_bytes += len(chunk_data)
+
+                        # Upload when we have enough data or this is the last chunk
+                        if part_buffer.tell() >= MULTIPART_PART_SIZE or done:
+                            if part_buffer.tell() > 0:
+                                # Pass BytesIO directly to avoid memory copy from getvalue()
+                                part_buffer.seek(0)
+                                response = s3.upload_part(
+                                    Bucket=self.config.s3_bucket,
+                                    Key=s3_key,
+                                    PartNumber=part_number,
+                                    UploadId=upload_id,
+                                    Body=part_buffer,
+                                )
+                                parts.append(
+                                    {
+                                        "PartNumber": part_number,
+                                        "ETag": response["ETag"],
+                                    }
+                                )
+                                part_number += 1
+
+                            # Reset part buffer for next part, avoiding reallocation
+                            part_buffer.seek(0)
+                            part_buffer.truncate(0)
+
+                    # Complete multipart upload
+                    s3.complete_multipart_upload(
+                        Bucket=self.config.s3_bucket,
+                        Key=s3_key,
+                        UploadId=upload_id,
+                        MultipartUpload={"Parts": parts},
+                    )
+
+            return total_bytes
+
+        except Exception as e:
+            # Abort multipart upload on error to prevent orphaned parts
+            if upload_id:
+                logger.warning(
+                    "Aborting multipart upload due to error",
+                    s3_key=s3_key,
+                    upload_id=upload_id,
+                    error=str(e),
+                )
+                try:
+                    s3.abort_multipart_upload(
+                        Bucket=self.config.s3_bucket,
+                        Key=s3_key,
+                        UploadId=upload_id,
+                    )
+                except Exception as abort_exc:
+                    logger.error(
+                        "Failed to abort multipart upload - orphaned parts may remain",
+                        s3_key=s3_key,
+                        upload_id=upload_id,
+                        abort_error=str(abort_exc),
+                    )
+            # Always re-raise the original exception
+            raise
+
     def process_job(self, job: dict[str, Any]) -> bool:
         """Process a single attachment job. Returns True on success."""
         gmail_id = job["payload"]["gmail_id"]
@@ -271,7 +425,9 @@ class AttachmentWorker:
                 )
                 if cur.fetchone():
                     logger.debug(
-                        f"Attachment already exists: {gmail_id}/{attachment_id}"
+                        "Attachment already exists",
+                        gmail_id=gmail_id,
+                        attachment_id=attachment_id,
                     )
                     self._complete_job(job["id"])
                     return True
@@ -280,27 +436,14 @@ class AttachmentWorker:
             metadata = self._get_attachment_metadata(gmail_id, attachment_id)
             if not metadata:
                 logger.warning(
-                    f"Attachment metadata not found: {gmail_id}/{attachment_id}"
+                    "Attachment metadata not found",
+                    gmail_id=gmail_id,
+                    attachment_id=attachment_id,
                 )
                 self._fail_job(
                     job["id"], "Attachment metadata not found in raw_response"
                 )
                 return False
-
-            # Fetch attachment data from Gmail
-            gmail = self._get_gmail_service()
-            att_response = (
-                gmail.users()
-                .messages()
-                .attachments()
-                .get(userId="me", messageId=gmail_id, id=attachment_id)
-                .execute()
-            )
-
-            # Decode base64url data
-            # Gmail API returns base64url without padding - add correct padding
-            raw_data = att_response["data"]
-            data = base64.urlsafe_b64decode(raw_data + "=" * (-len(raw_data) % 4))
 
             # Generate S3 key: attachments/{gmail_id}/{attachment_id_hash}/{filename}
             # Sanitize filename to prevent path traversal attacks
@@ -310,14 +453,55 @@ class AttachmentWorker:
             att_id_hash = hashlib.sha256(attachment_id.encode()).hexdigest()
             s3_key = f"attachments/{gmail_id}/{att_id_hash}/{filename}"
 
-            # Upload to S3/Minio
-            s3 = self._get_s3_client()
-            s3.put_object(
-                Bucket=self.config.s3_bucket,
-                Key=s3_key,
-                Body=data,
-                ContentType=metadata["mime_type"],
-            )
+            # Choose upload strategy based on size
+            size_bytes = metadata["size"]
+            if size_bytes < MULTIPART_THRESHOLD_BYTES:
+                # Small file: fetch all at once and use simple upload
+                actual_size = self._upload_small_file_direct(
+                    s3_key, gmail_id, attachment_id, metadata["mime_type"]
+                )
+                if actual_size != size_bytes:
+                    logger.warning(
+                        "Attachment size mismatch for small file",
+                        s3_key=s3_key,
+                        expected_size=size_bytes,
+                        actual_size=actual_size,
+                        gmail_id=gmail_id,
+                    )
+
+                logger.info(
+                    "Stored small attachment",
+                    s3_key=s3_key,
+                    size_bytes=actual_size,
+                    gmail_id=gmail_id,
+                )
+
+            else:
+                # Large file: stream download and use multipart upload
+                logger.info(
+                    "Streaming large attachment",
+                    s3_key=s3_key,
+                    size_bytes=size_bytes,
+                    gmail_id=gmail_id,
+                )
+                actual_size = self._upload_large_file_streaming(
+                    s3_key, gmail_id, attachment_id, metadata["mime_type"]
+                )
+                if actual_size != size_bytes:
+                    logger.warning(
+                        "Attachment size mismatch for large file",
+                        s3_key=s3_key,
+                        expected_size=size_bytes,
+                        actual_size=actual_size,
+                        gmail_id=gmail_id,
+                    )
+
+                logger.info(
+                    "Stored large attachment",
+                    s3_key=s3_key,
+                    size_bytes=actual_size,
+                    gmail_id=gmail_id,
+                )
 
             # Store record and complete job in single transaction for atomicity
             conn = self._get_pg_conn()
@@ -340,7 +524,7 @@ class AttachmentWorker:
                         attachment_id,
                         filename,
                         metadata["mime_type"],
-                        len(data),
+                        actual_size,
                         self.config.s3_bucket,
                         s3_key,
                     ),
@@ -355,8 +539,6 @@ class AttachmentWorker:
                 )
                 conn.commit()
 
-            logger.info(f"Stored attachment: {s3_key} ({len(data)} bytes)")
-
             # Record processing duration
             PROCESSING_DURATION.labels(queue="attachment", operation="process").observe(
                 time.time() - start_time
@@ -365,11 +547,23 @@ class AttachmentWorker:
             return True
 
         except HttpError as e:
-            logger.error(f"Gmail API error for {gmail_id}/{attachment_id}: {e}")
+            logger.error(
+                "Gmail API error",
+                gmail_id=gmail_id,
+                attachment_id=attachment_id,
+                error=str(e),
+                exc_info=True,
+            )
             self._fail_job(job["id"], str(e))
             return False
         except Exception as e:
-            logger.error(f"Failed to process {gmail_id}/{attachment_id}: {e}")
+            logger.error(
+                "Failed to process attachment",
+                gmail_id=gmail_id,
+                attachment_id=attachment_id,
+                error=str(e),
+                exc_info=True,
+            )
             self._fail_job(job["id"], str(e))
             return False
 
@@ -386,7 +580,10 @@ class AttachmentWorker:
             jobs = self._claim_jobs(self.config.batch_size)
 
             if not jobs:
-                logger.debug(f"No jobs, sleeping {self.config.poll_interval}s")
+                logger.debug(
+                    "No jobs, sleeping",
+                    poll_interval_seconds=self.config.poll_interval,
+                )
                 # Check shutdown more frequently than poll interval
                 for _ in range(self.config.poll_interval):
                     if not self._shutdown.should_continue():
@@ -394,7 +591,7 @@ class AttachmentWorker:
                     time.sleep(1)
                 continue
 
-            logger.info(f"Processing batch of {len(jobs)} attachments")
+            logger.info("Processing batch", batch_size=len(jobs))
 
             for job in jobs:
                 if not self._shutdown.should_continue():
@@ -415,12 +612,14 @@ class AttachmentWorker:
                         ).inc()
 
                 if (processed + failed) % 50 == 0:
-                    logger.info(f"Progress: {processed} processed, {failed} failed")
+                    logger.info("Progress", processed=processed, failed=failed)
 
         # Wait for any remaining in-flight work
         self._shutdown.wait_for_completion(timeout=30.0)
         logger.info(
-            f"Attachment worker stopped: {processed} processed, {failed} failed"
+            "Attachment worker stopped",
+            total_processed=processed,
+            total_failed=failed,
         )
 
     def run_once(self) -> tuple[int, int]:
@@ -438,7 +637,7 @@ class AttachmentWorker:
             if not jobs:
                 break
 
-            logger.info(f"Processing batch of {len(jobs)} attachments")
+            logger.info("Processing batch", batch_size=len(jobs))
 
             for job in jobs:
                 if self.process_job(job):
@@ -452,16 +651,18 @@ class AttachmentWorker:
                     ).inc()
 
                 if (processed + failed) % 50 == 0:
-                    logger.info(f"Progress: {processed} processed, {failed} failed")
+                    logger.info("Progress", processed=processed, failed=failed)
 
         logger.info(
-            f"Attachment worker complete: {processed} processed, {failed} failed"
+            "Attachment worker complete",
+            total_processed=processed,
+            total_failed=failed,
         )
         return processed, failed
 
     def stop(self) -> None:
         """Signal the worker to stop gracefully."""
-        logger.info("Initiating graceful shutdown...")
+        logger.info("Initiating graceful shutdown")
         self._shutdown.initiate()
 
 
@@ -491,13 +692,17 @@ def main() -> None:
     ]
     missing = [v for v in required_vars if not os.environ.get(v)]
     if missing:
-        logger.error(f"Missing required environment variables: {', '.join(missing)}")
+        logger.error("Missing required environment variables", variables=missing)
         sys.exit(1)
+
+    # Configure logging
+    log_level = os.environ.get("LOG_LEVEL", "INFO")
+    configure_logging("attachment-worker", level=log_level)
 
     # Start metrics server
     metrics_port = int(os.environ.get("METRICS_PORT", "8002"))
     start_metrics_server(port=metrics_port)
-    logger.info(f"Metrics server started on port {metrics_port}")
+    logger.info("Metrics server started", port=metrics_port)
 
     config = Config(
         postgres_host=os.environ["POSTGRES_HOST"],

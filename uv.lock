@@ -1387,6 +1387,7 @@ dependencies = [
     { name = "python-levenshtein" },
     { name = "schedule" },
     { name = "sqlalchemy" },
+    { name = "structlog" },
     { name = "uvicorn" },
 ]
 
@@ -1433,6 +1434,7 @@ requires-dist = [
     { name = "python-levenshtein", specifier = ">=0.20.0" },
     { name = "schedule", specifier = ">=1.2.0" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
+    { name = "structlog", specifier = ">=24.0.0" },
     { name = "types-beautifulsoup4", marker = "extra == 'dev'" },
     { name = "types-boto3", marker = "extra == 'dev'" },
     { name = "types-requests", marker = "extra == 'dev'" },
