@@ -308,15 +308,16 @@ class AttachmentWorker:
         s3 = self._get_s3_client()
         gmail = self._get_gmail_service()
 
-        # Initiate multipart upload
-        multipart = s3.create_multipart_upload(
-            Bucket=self.config.s3_bucket,
-            Key=s3_key,
-            ContentType=mime_type,
-        )
-        upload_id = multipart["UploadId"]
-
+        upload_id = None
         try:
+            # Initiate multipart upload
+            multipart = s3.create_multipart_upload(
+                Bucket=self.config.s3_bucket,
+                Key=s3_key,
+                ContentType=mime_type,
+            )
+            upload_id = multipart["UploadId"]
+
             # Get attachment as media request for streaming
             request = (
                 gmail.users()
@@ -385,25 +386,26 @@ class AttachmentWorker:
 
         except Exception as e:
             # Abort multipart upload on error to prevent orphaned parts
-            logger.warning(
-                "Aborting multipart upload due to streaming error",
-                s3_key=s3_key,
-                upload_id=upload_id,
-                error=str(e),
-            )
-            try:
-                s3.abort_multipart_upload(
-                    Bucket=self.config.s3_bucket,
-                    Key=s3_key,
-                    UploadId=upload_id,
-                )
-            except Exception as abort_exc:
-                logger.error(
-                    "Failed to abort multipart upload - orphaned parts may remain",
+            if upload_id:
+                logger.warning(
+                    "Aborting multipart upload due to error",
                     s3_key=s3_key,
                     upload_id=upload_id,
-                    abort_error=str(abort_exc),
+                    error=str(e),
                 )
+                try:
+                    s3.abort_multipart_upload(
+                        Bucket=self.config.s3_bucket,
+                        Key=s3_key,
+                        UploadId=upload_id,
+                    )
+                except Exception as abort_exc:
+                    logger.error(
+                        "Failed to abort multipart upload - orphaned parts may remain",
+                        s3_key=s3_key,
+                        upload_id=upload_id,
+                        abort_error=str(abort_exc),
+                    )
             # Always re-raise the original exception
             raise
 
