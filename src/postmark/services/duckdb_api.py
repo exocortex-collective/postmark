@@ -470,8 +470,7 @@ def get_stats() -> StatsResponse:
 
 @app.get("/gmail_ids", response_model=GmailIdsResponse)
 def get_gmail_ids(
-    limit: int
-    | None = Query(
+    limit: int | None = Query(
         default=None,
         ge=0,
         description="Max IDs to return. Defaults to 10000 to prevent OOM. Use 0 for unlimited (not recommended for large mailboxes).",

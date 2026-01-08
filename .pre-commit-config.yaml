@@ -3,7 +3,7 @@ exclude: tests/eml_fixtures/
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.4.0
+    rev: v6.0.0
     hooks:
       - id: trailing-whitespace
         exclude: '\.md$'
@@ -14,18 +14,18 @@ repos:
       - id: check-merge-conflict
 
   - repo: https://github.com/psf/black
-    rev: 23.7.0
+    rev: 25.12.0
     hooks:
       - id: black
         language_version: python3
 
   - repo: https://github.com/pycqa/isort
-    rev: 5.12.0
+    rev: 7.0.0
     hooks:
       - id: isort
 
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.5.1
+    rev: v1.19.1
     hooks:
       - id: mypy
         additional_dependencies: [types-requests, types-boto3, fastapi, pydantic]
