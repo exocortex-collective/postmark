@@ -36,7 +36,7 @@ jobs:
 
       - name: Lint (Type)
         run: |
-          uv run mypy . --ignore-missing-imports --disable-error-code=misc
+          uv run mypy src/postmark
 
       - name: Test
         run: |
