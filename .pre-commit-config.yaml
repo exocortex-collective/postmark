@@ -30,7 +30,7 @@ repos:
       - id: mypy
         additional_dependencies: [types-requests, types-boto3, fastapi, pydantic]
         args: [--ignore-missing-imports]
-        exclude: '^(src/postmark/archive/|src/postmark/cli/|tests/)'
+        exclude: '^(src/postmark/archive/|tests/)'
 
   - repo: local
     hooks:
