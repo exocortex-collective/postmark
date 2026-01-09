@@ -17,6 +17,7 @@ import boto3
 import psycopg2
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
+from cortex_utils.logging import configure_logging, get_logger
 from cortex_utils.metrics import (
     ERRORS,
     PROCESSING_DURATION,
@@ -28,7 +29,6 @@ from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
-from postmark.logging_config import configure_logging, get_logger
 from postmark.reliability import GracefulShutdown
 
 logger = get_logger(__name__)

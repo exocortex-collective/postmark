@@ -1,7 +1,6 @@
 """Gmail sync service - pulls from Pub/Sub, stores raw messages."""
 
 import json
-import logging
 import os
 import threading
 import time
@@ -15,6 +14,7 @@ from typing import Any
 
 import psycopg2
 import schedule
+from cortex_utils.logging import configure_logging, get_logger
 from cortex_utils.metrics import (
     EMAILS_SYNCED,
     ERRORS,
@@ -80,11 +80,7 @@ def is_retryable_http_error(error: HttpError) -> bool:
     return True
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -1601,6 +1597,10 @@ def main() -> None:
         help="Backfill from date (YYYY-MM-DD) and exit",
     )
     args = parser.parse_args()
+
+    # Configure logging
+    log_level = os.environ.get("LOG_LEVEL", "INFO")
+    configure_logging(service_name="gmail-sync", level=log_level)
 
     # Start metrics server
     metrics_port = int(os.environ.get("METRICS_PORT", "8000"))

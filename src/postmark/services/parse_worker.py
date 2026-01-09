@@ -3,7 +3,6 @@
 
 import argparse
 import json
-import logging
 import os
 import signal
 import sys
@@ -13,6 +12,7 @@ from typing import Any
 
 import psycopg2
 import psycopg2.errors
+from cortex_utils.logging import configure_logging, get_logger
 from cortex_utils.metrics import (
     EMAILS_PARSED,
     ERRORS,
@@ -28,11 +28,7 @@ from postmark.email.gmail_parser import ParsedEmail, parse_gmail_message
 from postmark.reliability import GracefulShutdown
 from postmark.storage.duckdb_client import get_body_data_from_api
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # How long a job can be in 'processing' before it's considered stale
 # and reset to 'pending' (visibility timeout)
@@ -527,6 +523,10 @@ def main() -> None:
         help="Number of jobs to process per batch (default: 100)",
     )
     args = parser.parse_args()
+
+    # Configure logging
+    log_level = os.environ.get("LOG_LEVEL", "INFO")
+    configure_logging(service_name="parse-worker", level=log_level)
 
     # All config from environment - use .env.template as reference
     required_vars = [

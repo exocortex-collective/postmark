@@ -6,7 +6,6 @@ since DuckDB doesn't support multiple concurrent connections.
 
 import base64
 import json
-import logging
 import os
 import re
 import threading
@@ -17,6 +16,7 @@ from typing import Any
 import duckdb
 import html2text
 import uvicorn
+from cortex_utils.logging import configure_logging, get_logger
 from cortex_utils.metrics import ERRORS, start_metrics_server
 from fastapi import FastAPI, HTTPException, Query, Request
 from prometheus_client import REGISTRY, Counter, Gauge, Histogram
@@ -24,7 +24,7 @@ from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 DUCKDB_PATH = os.environ.get("DUCKDB_PATH", "/app/data/emails.duckdb")
 HOST = os.environ.get("DUCKDB_API_HOST", "0.0.0.0")
@@ -638,6 +638,10 @@ def checkpoint() -> StatusResponse:
 
 def main() -> None:
     """Run the DuckDB API server."""
+    # Configure logging
+    log_level = os.environ.get("LOG_LEVEL", "INFO")
+    configure_logging(service_name="duckdb-api", level=log_level)
+
     # Start metrics server on separate port
     metrics_port = int(os.environ.get("METRICS_PORT", "8003"))
     start_metrics_server(port=metrics_port)
