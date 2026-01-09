@@ -146,12 +146,11 @@ class TestCircuitBreaker:
         cb = CircuitBreaker(
             name="test", config=CircuitBreakerConfig(failure_threshold=10)
         )
-        results = []
 
         def worker() -> None:
             for _ in range(5):
                 cb.record_failure()
-                results.append(cb.allow_request())
+                cb.allow_request()
 
         threads = [threading.Thread(target=worker) for _ in range(3)]
         for t in threads:
