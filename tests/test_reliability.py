@@ -197,20 +197,16 @@ class TestCallWithCircuitBreaker:
         func = Mock(return_value="success")
 
         # Record a failure first
-        try:
+        with pytest.raises(ValueError):
             call_with_circuit_breaker(cb, Mock(side_effect=ValueError()))
-        except ValueError:
-            pass
 
         # Success should reset failure count (verify by checking state remains closed)
         call_with_circuit_breaker(cb, func)
         assert cb.state == CircuitState.CLOSED
 
         # One more failure shouldn't open circuit (count was reset)
-        try:
+        with pytest.raises(ValueError):
             call_with_circuit_breaker(cb, Mock(side_effect=ValueError()))
-        except ValueError:
-            pass
         assert cb.state == CircuitState.CLOSED  # Still closed (count was reset)
 
     def test_records_failure_and_raises_on_exception(self) -> None:
