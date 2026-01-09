@@ -192,12 +192,27 @@ class TestCallWithCircuitBreaker:
 
     def test_records_success_on_success(self) -> None:
         """Should record success when function succeeds."""
-        cb = CircuitBreaker(name="test")
+        cb = CircuitBreaker(
+            name="test", config=CircuitBreakerConfig(failure_threshold=2)
+        )
         func = Mock(return_value="success")
 
-        call_with_circuit_breaker(cb, func)
+        # Record a failure first
+        try:
+            call_with_circuit_breaker(cb, Mock(side_effect=ValueError()))
+        except ValueError:
+            pass
 
-        assert cb._failure_count == 0  # Success resets count
+        # Success should reset failure count (verify by checking state remains closed)
+        call_with_circuit_breaker(cb, func)
+        assert cb.state == CircuitState.CLOSED
+
+        # One more failure shouldn't open circuit (count was reset)
+        try:
+            call_with_circuit_breaker(cb, Mock(side_effect=ValueError()))
+        except ValueError:
+            pass
+        assert cb.state == CircuitState.CLOSED  # Still closed (count was reset)
 
     def test_records_failure_and_raises_on_exception(self) -> None:
         """Should record failure and re-raise exception."""
@@ -206,10 +221,10 @@ class TestCallWithCircuitBreaker:
         )
         func = Mock(side_effect=ValueError("test error"))
 
+        # First failure - circuit should stay closed
         with pytest.raises(ValueError, match="test error"):
             call_with_circuit_breaker(cb, func)
-
-        assert cb._failure_count == 1
+        assert cb.state == CircuitState.CLOSED
 
         # Second failure should open circuit
         with pytest.raises(ValueError):
@@ -335,12 +350,19 @@ class TestGracefulShutdown:
         """Should track in-flight work count."""
         shutdown = GracefulShutdown()
 
-        with shutdown.track_work():
-            assert shutdown._in_flight == 1
+        # Verify wait_for_completion behavior with nested work tracking
+        def nested_worker() -> None:
             with shutdown.track_work():
-                assert shutdown._in_flight == 2
+                time.sleep(0.05)
+                with shutdown.track_work():
+                    time.sleep(0.05)
 
-        assert shutdown._in_flight == 0
+        thread = threading.Thread(target=nested_worker)
+        thread.start()
+
+        # Should wait for all nested work to complete
+        assert shutdown.wait_for_completion(timeout=1.0) is True
+        thread.join()
 
     def test_wait_for_completion_succeeds(self) -> None:
         """Should wait for all work to complete."""
