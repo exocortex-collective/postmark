@@ -3,7 +3,6 @@
 Provides circuit breaker, exponential backoff, and graceful shutdown helpers.
 """
 
-import logging
 import random
 import threading
 import time
@@ -11,7 +10,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, TypeVar
 
-logger = logging.getLogger(__name__)
+from cortex_utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 T = TypeVar("T")
 

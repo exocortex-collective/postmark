@@ -5,12 +5,13 @@ Supports both REST API access and direct local DuckDB connections.
 """
 
 import json
-import logging
 import urllib.error
 import urllib.request
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from cortex_utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def get_body_data_from_api(api_url: str, gmail_id: str) -> dict[str, Any]:
