@@ -1,8 +1,7 @@
 """Tests for Gmail API response parsing utilities."""
 
+import base64
 from datetime import datetime, timezone
-
-import pytest
 
 from postmark.email.gmail_parser import (
     ParsedEmail,
@@ -49,7 +48,7 @@ class TestDecodeMimeHeader:
     def test_invalid_charset_fallback(self) -> None:
         # Invalid charset should fall back to UTF-8
         result = decode_mime_header("=?INVALID-CHARSET?B?SGVsbG8=?=")
-        assert "Hello" in result
+        assert result == "Hello"
 
 
 class TestExtractEmailAddress:
@@ -225,11 +224,9 @@ class TestDecodeBase64Body:
 
     def test_non_utf8_decodes_with_replace(self) -> None:
         # Non-UTF8 bytes should decode with replacement character
-        import base64
-
         non_utf8 = base64.urlsafe_b64encode(b"\xff\xfe\xfd").decode("ascii")
         result = decode_base64_body(non_utf8)
-        assert isinstance(result, str)  # Should not crash
+        assert result == "\ufffd\ufffd\ufffd"  # Check for replacement characters
 
 
 class TestExtractBodyFromParts:

@@ -117,7 +117,9 @@ def decode_base64_body(data: str | None) -> str:
         return ""
     try:
         # Gmail uses URL-safe base64
-        decoded = base64.urlsafe_b64decode(data + "==")
+        # Add correct padding: 0, 2, or 3 '=' characters
+        padding = "=" * (-len(data) % 4)
+        decoded = base64.urlsafe_b64decode(data + padding)
         return decoded.decode("utf-8", errors="replace")
     except (binascii.Error, ValueError, UnicodeDecodeError):
         return ""
