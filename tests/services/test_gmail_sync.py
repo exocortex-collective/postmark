@@ -1,17 +1,18 @@
 from unittest.mock import Mock
 
+import pytest
 from googleapiclient.errors import HttpError
 
 from postmark.services.gmail_sync import is_retryable_http_error
 
 
-def test_is_retryable_http_error_5xx() -> None:
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+def test_is_retryable_http_error_5xx(status: int) -> None:
     """Test that 5XX server errors are retryable."""
-    for status in [500, 502, 503, 504]:
-        resp = Mock()
-        resp.status = status
-        error = HttpError(resp=resp, content=b"Server error")
-        assert is_retryable_http_error(error), f"Status {status} should be retryable"
+    resp = Mock()
+    resp.status = status
+    error = HttpError(resp=resp, content=b"Server error")
+    assert is_retryable_http_error(error), f"Status {status} should be retryable"
 
 
 def test_is_retryable_http_error_429() -> None:
@@ -22,15 +23,15 @@ def test_is_retryable_http_error_429() -> None:
     assert is_retryable_http_error(error), "429 rate limit should be retryable"
 
 
-def test_is_retryable_http_error_4xx_not_retryable() -> None:
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 409])
+def test_is_retryable_http_error_4xx_not_retryable(status: int) -> None:
     """Test that 4XX client errors (except 429) are not retryable."""
-    for status in [400, 401, 403, 404, 409]:
-        resp = Mock()
-        resp.status = status
-        error = HttpError(resp=resp, content=b"Client error")
-        assert not is_retryable_http_error(
-            error
-        ), f"Status {status} should not be retryable"
+    resp = Mock()
+    resp.status = status
+    error = HttpError(resp=resp, content=b"Client error")
+    assert not is_retryable_http_error(
+        error
+    ), f"Status {status} should not be retryable"
 
 
 def test_is_retryable_http_error_2xx_retryable() -> None:

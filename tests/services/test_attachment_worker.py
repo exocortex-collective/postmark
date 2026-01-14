@@ -36,10 +36,11 @@ def test_find_attachment_in_parts_direct_match(worker: AttachmentWorker) -> None
 
     result = worker._find_attachment_in_parts(payload, "abc123")
 
-    assert result is not None
-    assert result["filename"] == "test.pdf"
-    assert result["mime_type"] == "application/pdf"
-    assert result["size"] == 1024
+    assert result == {
+        "filename": "test.pdf",
+        "mime_type": "application/pdf",
+        "size": 1024,
+    }
 
 
 def test_find_attachment_in_parts_nested(worker: AttachmentWorker) -> None:
@@ -58,10 +59,11 @@ def test_find_attachment_in_parts_nested(worker: AttachmentWorker) -> None:
 
     result = worker._find_attachment_in_parts(payload, "xyz789")
 
-    assert result is not None
-    assert result["filename"] == "nested.jpg"
-    assert result["mime_type"] == "image/jpeg"
-    assert result["size"] == 2048
+    assert result == {
+        "filename": "nested.jpg",
+        "mime_type": "image/jpeg",
+        "size": 2048,
+    }
 
 
 def test_find_attachment_in_parts_deeply_nested(worker: AttachmentWorker) -> None:
@@ -84,10 +86,11 @@ def test_find_attachment_in_parts_deeply_nested(worker: AttachmentWorker) -> Non
 
     result = worker._find_attachment_in_parts(payload, "deep123")
 
-    assert result is not None
-    assert result["filename"] == "deep.zip"
-    assert result["mime_type"] == "application/zip"
-    assert result["size"] == 512
+    assert result == {
+        "filename": "deep.zip",
+        "mime_type": "application/zip",
+        "size": 512,
+    }
 
 
 def test_find_attachment_in_parts_not_found(worker: AttachmentWorker) -> None:
@@ -111,10 +114,11 @@ def test_find_attachment_in_parts_missing_fields(worker: AttachmentWorker) -> No
 
     result = worker._find_attachment_in_parts(payload, "test123")
 
-    assert result is not None
-    assert result["filename"] == "attachment"  # Default value
-    assert result["mime_type"] == "application/octet-stream"  # Default value
-    assert result["size"] == 0  # Default value
+    assert result == {
+        "filename": "attachment",
+        "mime_type": "application/octet-stream",
+        "size": 0,
+    }
 
 
 def test_find_attachment_in_parts_empty_payload(worker: AttachmentWorker) -> None:
