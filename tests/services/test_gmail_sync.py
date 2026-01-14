@@ -34,29 +34,21 @@ def test_is_retryable_http_error_4xx_not_retryable(status: int) -> None:
     ), f"Status {status} should not be retryable"
 
 
-def test_is_retryable_http_error_2xx_retryable() -> None:
-    """Test that 2XX success codes are conservatively retryable."""
+@pytest.mark.parametrize(
+    "status,description",
+    [
+        (200, "Success"),
+        (301, "Redirect"),
+        (999, "Unknown"),
+    ],
+)
+def test_is_retryable_http_error_other_codes_retryable(
+    status: int, description: str
+) -> None:
+    """Test that various other codes are conservatively retryable."""
     resp = Mock()
-    resp.status = 200
-    error = HttpError(resp=resp, content=b"Success")
+    resp.status = status
+    error = HttpError(resp=resp, content=description.encode("utf-8"))
     assert is_retryable_http_error(
         error
-    ), "Non-4XX/5XX should be conservatively retryable"
-
-
-def test_is_retryable_http_error_3xx_retryable() -> None:
-    """Test that 3XX redirect codes are conservatively retryable."""
-    resp = Mock()
-    resp.status = 301
-    error = HttpError(resp=resp, content=b"Redirect")
-    assert is_retryable_http_error(error), "3XX should be conservatively retryable"
-
-
-def test_is_retryable_http_error_unusual_status() -> None:
-    """Test that unusual status codes are conservatively retryable."""
-    resp = Mock()
-    resp.status = 999
-    error = HttpError(resp=resp, content=b"Unknown")
-    assert is_retryable_http_error(
-        error
-    ), "Unusual status should be conservatively retryable"
+    ), f"Status {status} ({description}) should be conservatively retryable"
