@@ -104,3 +104,22 @@ def test_detect_thread_new() -> None:
     thread_id = detect_thread(new_email, fake_resolver)
     assert thread_id != "sibling-uuid", "Should be a new thread"
     assert thread_id != "parent-uuid", "Should not match parent's thread"
+
+
+def test_detect_thread_with_references() -> None:
+    """Test detect_thread when email has references header."""
+    # Email with references list (most recent first, per RFC)
+    email_with_refs = Email(
+        uuid="refs-uuid",
+        message_id="<child2@example.com>",
+        date=datetime.datetime(2024, 1, 3),
+        subject="Re: Re: Hello World",
+        from_addr="someone@example.com",
+        body_text="Reply in thread",
+        body_html="",
+        raw_msg=b"",
+        references=["<parent.1@example.com>", "<other@example.com>"],
+    )
+    # Should find parent via references (checked in reverse order)
+    thread_id = detect_thread(email_with_refs, fake_resolver)
+    assert thread_id == "parent-uuid", "Should match parent via references"
