@@ -8,19 +8,6 @@ from postmark.services.attachment_worker import AttachmentWorker
 @pytest.fixture
 def worker() -> AttachmentWorker:
     """Create a mock AttachmentWorker instance for testing methods."""
-    # Mock the config to avoid actual connections
-    config = Mock()
-    config.postgres_host = "localhost"
-    config.postgres_port = 5432
-    config.postgres_db = "test"
-    config.postgres_user = "test"
-    config.postgres_password = "test"
-    config.s3_endpoint_url = ""
-    config.s3_access_key_id = "test"
-    config.s3_secret_access_key = "test"
-    config.s3_bucket_name = "test"
-    config.gmail_token_path = "/tmp/test-token.json"
-
     # Create worker but don't call __init__ (would try to connect)
     worker = AttachmentWorker.__new__(AttachmentWorker)
     return worker
