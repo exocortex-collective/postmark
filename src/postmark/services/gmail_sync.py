@@ -1621,7 +1621,7 @@ def main() -> None:
         "--backfill-before",
         type=str,
         metavar="DATE",
-        help="End date for backfill (YYYY-MM-DD), used with --backfill-from",
+        help="End date for backfill (YYYY-MM-DD), works with --backfill, --backfill-only, or --backfill-from",
     )
     args = parser.parse_args()
 
@@ -1640,7 +1640,7 @@ def main() -> None:
     # Handle backfill modes
     if args.backfill_from:
         processed, stored, updated = sync.backfill(
-            after=args.backfill_from, before=getattr(args, "backfill_before", None)
+            after=args.backfill_from, before=args.backfill_before
         )
         print(
             f"Backfill complete: {processed} processed, {stored} stored, {updated} updated"
@@ -1648,14 +1648,16 @@ def main() -> None:
         return
 
     if args.backfill_only:
-        processed, stored, updated = sync.backfill(days=args.backfill_only)
+        processed, stored, updated = sync.backfill(
+            days=args.backfill_only, before=args.backfill_before
+        )
         print(
             f"Backfill complete: {processed} processed, {stored} stored, {updated} updated"
         )
         return
 
     if args.backfill:
-        sync.backfill(days=args.backfill)
+        sync.backfill(days=args.backfill, before=args.backfill_before)
 
     sync.run()
 
