@@ -137,15 +137,25 @@ def trigger(
     if starting:
         if after:
             raise click.ClickException("Use --starting or --after, not both")
-        after = (datetime.strptime(starting, "%Y-%m-%d") - timedelta(days=1)).strftime(
-            "%Y-%m-%d"
-        )
+        try:
+            after = (
+                datetime.strptime(starting, "%Y-%m-%d") - timedelta(days=1)
+            ).strftime("%Y-%m-%d")
+        except ValueError:
+            raise click.ClickException(
+                f"Invalid date format for --starting: '{starting}'. Expected YYYY-MM-DD."
+            )
     if ending:
         if before:
             raise click.ClickException("Use --ending or --before, not both")
-        before = (datetime.strptime(ending, "%Y-%m-%d") + timedelta(days=1)).strftime(
-            "%Y-%m-%d"
-        )
+        try:
+            before = (
+                datetime.strptime(ending, "%Y-%m-%d") + timedelta(days=1)
+            ).strftime("%Y-%m-%d")
+        except ValueError:
+            raise click.ClickException(
+                f"Invalid date format for --ending: '{ending}'. Expected YYYY-MM-DD."
+            )
 
     if days and after:
         raise click.ClickException(
