@@ -1303,6 +1303,10 @@ class GmailSync:
                 raise ValueError(
                     f"Invalid date format: '{before}'. Expected YYYY-MM-DD (e.g., 2025-08-01)"
                 )
+            if after_date >= before_date:
+                raise ValueError(
+                    f"Invalid date range: after ({after_date}) must be before ({before_date})"
+                )
             query += f" before:{before_date}"
             logger.info(f"Backfill date range: after {after_date} before {before_date}")
 

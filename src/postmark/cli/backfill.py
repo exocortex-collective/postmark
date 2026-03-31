@@ -92,20 +92,28 @@ def backfill() -> None:
     help="Backfill from date in YYYY-MM-DD format (e.g., --after 2025-01-01)",
 )
 @click.option(
+    "--before",
+    type=str,
+    help="End date in YYYY-MM-DD format (e.g., --before 2025-08-01)",
+)
+@click.option(
     "--direct",
     is_flag=True,
     help="Run backfill directly (bypass Gateway, requires Gmail credentials)",
 )
-def trigger(days: int | None, after: str | None, direct: bool) -> None:
+def trigger(
+    days: int | None, after: str | None, before: str | None, direct: bool
+) -> None:
     """Trigger a Gmail API backfill job.
 
     Either --days or --after must be provided (but not both).
+    Optionally use --before to limit the end date.
 
     Examples:
 
         postmark backfill trigger --days 7
 
-        postmark backfill trigger --after 2025-01-01
+        postmark backfill trigger --after 2025-01-01 --before 2025-08-01
 
         postmark backfill trigger --days 30 --direct
     """
@@ -117,7 +125,7 @@ def trigger(days: int | None, after: str | None, direct: bool) -> None:
 
     if direct:
         # Direct mode - run backfill locally without Gateway
-        _run_direct_backfill(days, after)
+        _run_direct_backfill(days, after, before)
         return
 
     # Queue via Gateway API
@@ -126,6 +134,8 @@ def trigger(days: int | None, after: str | None, direct: bool) -> None:
         data["days"] = days
     if after:
         data["after"] = after
+    if before:
+        data["before"] = before
 
     result = api_request("POST", "/sync/backfill", data)
 
@@ -244,6 +254,8 @@ def _show_job(job_id: str) -> None:
         click.echo(f"Days: {days}")
     if (after_date := result.get("after_date")) is not None:
         click.echo(f"After: {after_date}")
+    if (before_date := result.get("before_date")) is not None:
+        click.echo(f"Before: {before_date}")
     click.echo(f"Processed: {result.get('processed', 0)}")
     click.echo(f"Stored: {result.get('stored', 0)}")
     click.echo(f"Updated: {result.get('updated', 0)}")
@@ -288,7 +300,9 @@ def _watch_job(job_id: str, interval: int) -> None:
         time.sleep(interval)
 
 
-def _run_direct_backfill(days: int | None, after: str | None) -> None:
+def _run_direct_backfill(
+    days: int | None, after: str | None, before: str | None
+) -> None:
     """Run backfill directly without Gateway (requires Gmail credentials)."""
     click.echo("Running direct backfill (bypassing Gateway)...")
 
@@ -306,9 +320,9 @@ def _run_direct_backfill(days: int | None, after: str | None) -> None:
     sync = GmailSync(config)
 
     if days:
-        processed, stored, updated = sync.backfill(days=days)
+        processed, stored, updated = sync.backfill(days=days, before=before)
     elif after:
-        processed, stored, updated = sync.backfill(after=after)
+        processed, stored, updated = sync.backfill(after=after, before=before)
     else:
         raise click.ClickException("Provide either --days or --after")
 
