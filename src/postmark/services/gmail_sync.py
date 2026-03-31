@@ -398,6 +398,7 @@ class GmailSync:
                     query TEXT NOT NULL,
                     days INTEGER,
                     after_date DATE,
+                    before_date DATE,
                     processed INTEGER DEFAULT 0,
                     stored INTEGER DEFAULT 0,
                     updated INTEGER DEFAULT 0,
@@ -409,6 +410,9 @@ class GmailSync:
                         status IN ('pending', 'running', 'completed', 'cancelled', 'failed')
                     )
                 );
+
+                -- Migration: add before_date if missing
+                ALTER TABLE backfill_jobs ADD COLUMN IF NOT EXISTS before_date DATE;
 
                 CREATE INDEX IF NOT EXISTS idx_backfill_jobs_pending
                     ON backfill_jobs(status, created_at)
@@ -1253,16 +1257,18 @@ class GmailSync:
         self,
         days: int | None = None,
         after: str | None = None,
+        before: str | None = None,
         job_id: str | None = None,
     ) -> tuple[int, int, int]:
-        """Backfill emails from a date.
+        """Backfill emails from a date range.
 
         Fetches message IDs via messages.list, stores any missing messages,
         and updates the history baseline if we found newer messages.
 
         Args:
             days: Number of days back from today (e.g., 7 for last week)
-            after: Absolute date in YYYY-MM-DD format (e.g., "2025-01-01")
+            after: Start date in YYYY-MM-DD format (e.g., "2025-01-01")
+            before: End date in YYYY-MM-DD format (e.g., "2025-08-01"), optional
             job_id: Optional backfill_jobs.id for progress tracking and cancellation
 
         Returns:
@@ -1289,6 +1295,16 @@ class GmailSync:
             raise ValueError("Must provide either 'days' or 'after' parameter")
 
         query = f"after:{after_date}"
+
+        if before:
+            try:
+                before_date = datetime.strptime(before, "%Y-%m-%d").strftime("%Y/%m/%d")
+            except ValueError:
+                raise ValueError(
+                    f"Invalid date format: '{before}'. Expected YYYY-MM-DD (e.g., 2025-08-01)"
+                )
+            query += f" before:{before_date}"
+            logger.info(f"Backfill date range: after {after_date} before {before_date}")
 
         stored = 0
         updated = 0
@@ -1418,7 +1434,7 @@ class GmailSync:
                     LIMIT 1
                     FOR UPDATE SKIP LOCKED
                 )
-                RETURNING id, query, days, after_date
+                RETURNING id, query, days, after_date, before_date
                 """
             )
             row = cur.fetchone()
@@ -1427,18 +1443,23 @@ class GmailSync:
             if not row:
                 return False
 
-            job_id, query, days, after_date = row
+            job_id, query, days, after_date, before_date = row
 
         logger.info(f"Starting backfill job {job_id}: {query}")
 
         try:
             # Run backfill with job tracking
+            before_str = before_date.strftime("%Y-%m-%d") if before_date else None
             if after_date:
                 processed, stored, updated = self.backfill(
-                    after=after_date.strftime("%Y-%m-%d"), job_id=job_id
+                    after=after_date.strftime("%Y-%m-%d"),
+                    before=before_str,
+                    job_id=job_id,
                 )
             elif days:
-                processed, stored, updated = self.backfill(days=days, job_id=job_id)
+                processed, stored, updated = self.backfill(
+                    days=days, before=before_str, job_id=job_id
+                )
             else:
                 # Query was provided directly (shouldn't happen in normal flow)
                 raise ValueError(f"Invalid job {job_id}: no days or after_date")
@@ -1596,6 +1617,12 @@ def main() -> None:
         metavar="DATE",
         help="Backfill from date (YYYY-MM-DD) and exit",
     )
+    parser.add_argument(
+        "--backfill-before",
+        type=str,
+        metavar="DATE",
+        help="End date for backfill (YYYY-MM-DD), used with --backfill-from",
+    )
     args = parser.parse_args()
 
     # Configure logging
@@ -1612,7 +1639,9 @@ def main() -> None:
 
     # Handle backfill modes
     if args.backfill_from:
-        processed, stored, updated = sync.backfill(after=args.backfill_from)
+        processed, stored, updated = sync.backfill(
+            after=args.backfill_from, before=getattr(args, "backfill_before", None)
+        )
         print(
             f"Backfill complete: {processed} processed, {stored} stored, {updated} updated"
         )
