@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta
 from typing import Any
 
 import click
@@ -89,12 +90,22 @@ def backfill() -> None:
 @click.option(
     "--after",
     type=str,
-    help="Backfill from date in YYYY-MM-DD format (e.g., --after 2025-01-01)",
+    help="Backfill after date, exclusive (YYYY-MM-DD)",
 )
 @click.option(
     "--before",
     type=str,
-    help="End date in YYYY-MM-DD format (e.g., --before 2025-08-01)",
+    help="Backfill before date, exclusive (YYYY-MM-DD)",
+)
+@click.option(
+    "--starting",
+    type=str,
+    help="Backfill starting from date, inclusive (YYYY-MM-DD)",
+)
+@click.option(
+    "--ending",
+    type=str,
+    help="Backfill ending on date, inclusive (YYYY-MM-DD)",
 )
 @click.option(
     "--direct",
@@ -102,26 +113,47 @@ def backfill() -> None:
     help="Run backfill directly (bypass Gateway, requires Gmail credentials)",
 )
 def trigger(
-    days: int | None, after: str | None, before: str | None, direct: bool
+    days: int | None,
+    after: str | None,
+    before: str | None,
+    starting: str | None,
+    ending: str | None,
+    direct: bool,
 ) -> None:
     """Trigger a Gmail API backfill job.
 
-    Either --days or --after must be provided (but not both).
-    Optionally use --before to limit the end date.
+    Either --days, --after, or --starting must be provided.
+    Use --starting/--ending for inclusive dates (easier to reason about).
 
     Examples:
 
-        postmark backfill trigger --days 7
+        postmark backfill trigger --starting 2025-01-01 --ending 2025-08-31
 
-        postmark backfill trigger --after 2025-01-01 --before 2025-08-01
+        postmark backfill trigger --after 2024-12-31 --before 2025-09-01
 
         postmark backfill trigger --days 30 --direct
     """
+    # Convert inclusive --starting/--ending to exclusive --after/--before
+    if starting:
+        if after:
+            raise click.ClickException("Use --starting or --after, not both")
+        after = (datetime.strptime(starting, "%Y-%m-%d") - timedelta(days=1)).strftime(
+            "%Y-%m-%d"
+        )
+    if ending:
+        if before:
+            raise click.ClickException("Use --ending or --before, not both")
+        before = (datetime.strptime(ending, "%Y-%m-%d") + timedelta(days=1)).strftime(
+            "%Y-%m-%d"
+        )
+
     if days and after:
-        raise click.ClickException("Provide either --days or --after, not both")
+        raise click.ClickException(
+            "Provide either --days or --after/--starting, not both"
+        )
 
     if not days and not after:
-        raise click.ClickException("Provide either --days or --after")
+        raise click.ClickException("Provide either --days, --after, or --starting")
 
     if direct:
         # Direct mode - run backfill locally without Gateway
