@@ -367,6 +367,8 @@ class GmailSync:
                       AND status IN ('pending', 'processing');
 
                 -- For attachment: dedup by gmail_id (one job per email)
+                -- Drop old index that included attachment_id; new definition drops it
+                DROP INDEX IF EXISTS idx_queue_dedup_attachment;
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_dedup_attachment
                     ON queue(queue_name, (payload->>'gmail_id'), created_at)
                     WHERE queue_name = 'attachment'
@@ -673,10 +675,12 @@ class GmailSync:
                             )
                             """,
                             (
-                                Json({
-                                    "gmail_id": gmail_id,
-                                    "attachment_ids": attachment_ids,
-                                }),
+                                Json(
+                                    {
+                                        "gmail_id": gmail_id,
+                                        "attachment_ids": attachment_ids,
+                                    }
+                                ),
                                 priority,
                                 gmail_id,
                             ),

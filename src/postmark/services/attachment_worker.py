@@ -225,10 +225,7 @@ class AttachmentWorker:
         with attachments at various levels).
         """
         body = payload.get("body", {})
-        if (
-            payload.get("filename")
-            and body.get("attachmentId") == attachment_id
-        ):
+        if payload.get("filename") and body.get("attachmentId") == attachment_id:
             return {
                 "filename": payload.get("filename", "attachment"),
                 "mime_type": payload.get("mimeType", "application/octet-stream"),
