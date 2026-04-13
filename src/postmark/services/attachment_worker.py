@@ -209,7 +209,7 @@ class AttachmentWorker:
             if not row or not row[0]:
                 return None
 
-            # Find attachment in parts
+            # Recursively search all nested MIME parts for the attachment
             raw_response = row[0]
             return self._find_attachment_in_parts(
                 raw_response.get("payload", {}), attachment_id
@@ -218,9 +218,17 @@ class AttachmentWorker:
     def _find_attachment_in_parts(
         self, payload: dict[str, Any], attachment_id: str
     ) -> dict[str, Any] | None:
-        """Recursively find attachment metadata in MIME parts."""
+        """Recursively find attachment metadata in MIME parts.
+
+        Searches the entire MIME tree, including deeply nested multipart
+        structures (e.g., multipart/mixed containing multipart/alternative
+        with attachments at various levels).
+        """
         body = payload.get("body", {})
-        if body.get("attachmentId") == attachment_id:
+        if (
+            payload.get("filename")
+            and body.get("attachmentId") == attachment_id
+        ):
             return {
                 "filename": payload.get("filename", "attachment"),
                 "mime_type": payload.get("mimeType", "application/octet-stream"),
@@ -409,126 +417,148 @@ class AttachmentWorker:
             # Always re-raise the original exception
             raise
 
+    def _process_single_attachment(
+        self, gmail_id: str, attachment_id: str
+    ) -> tuple[str, str, str, int]:
+        """Fetch and upload a single attachment. Returns (attachment_id, filename, mime_type, size)."""
+        # Get metadata
+        metadata = self._get_attachment_metadata(gmail_id, attachment_id)
+        if not metadata:
+            raise ValueError(
+                f"Attachment metadata not found in raw_response for {attachment_id}"
+            )
+
+        # Generate S3 key: attachments/{gmail_id}/{attachment_id_hash}/{filename}
+        # Sanitize filename to prevent path traversal attacks
+        raw_filename = metadata["filename"] or "attachment"
+        filename = os.path.basename(raw_filename)
+        # Hash the attachment_id to avoid special characters that Minio rejects
+        att_id_hash = hashlib.sha256(attachment_id.encode()).hexdigest()
+        s3_key = f"attachments/{gmail_id}/{att_id_hash}/{filename}"
+
+        # Choose upload strategy based on size
+        size_bytes = metadata["size"]
+        if size_bytes < MULTIPART_THRESHOLD_BYTES:
+            actual_size = self._upload_small_file_direct(
+                s3_key, gmail_id, attachment_id, metadata["mime_type"]
+            )
+            if actual_size != size_bytes:
+                logger.warning(
+                    "Attachment size mismatch for small file",
+                    s3_key=s3_key,
+                    expected_size=size_bytes,
+                    actual_size=actual_size,
+                    gmail_id=gmail_id,
+                )
+            logger.info(
+                "Stored small attachment",
+                s3_key=s3_key,
+                size_bytes=actual_size,
+                gmail_id=gmail_id,
+            )
+        else:
+            logger.info(
+                "Streaming large attachment",
+                s3_key=s3_key,
+                size_bytes=size_bytes,
+                gmail_id=gmail_id,
+            )
+            actual_size = self._upload_large_file_streaming(
+                s3_key, gmail_id, attachment_id, metadata["mime_type"]
+            )
+            if actual_size != size_bytes:
+                logger.warning(
+                    "Attachment size mismatch for large file",
+                    s3_key=s3_key,
+                    expected_size=size_bytes,
+                    actual_size=actual_size,
+                    gmail_id=gmail_id,
+                )
+            logger.info(
+                "Stored large attachment",
+                s3_key=s3_key,
+                size_bytes=actual_size,
+                gmail_id=gmail_id,
+            )
+
+        return attachment_id, filename, metadata["mime_type"], actual_size
+
     def process_job(self, job: dict[str, Any]) -> bool:
-        """Process a single attachment job. Returns True on success."""
+        """Process a single attachment job. Returns True on success.
+
+        Each job contains a gmail_id and a list of attachment_ids for that
+        email.  Supports both the new format (attachment_ids: list) and the
+        legacy format (attachment_id: str) for backwards compatibility with
+        queue entries created before this change.
+        """
         gmail_id = job["payload"]["gmail_id"]
-        attachment_id = job["payload"]["attachment_id"]
+        # Support both new (attachment_ids list) and legacy (single attachment_id) payload
+        attachment_ids: list[str] = job["payload"].get("attachment_ids", [])
+        if not attachment_ids and "attachment_id" in job["payload"]:
+            attachment_ids = [job["payload"]["attachment_id"]]
         start_time = time.time()
 
         try:
-            # Check if already processed
             conn = self._get_pg_conn()
+            # Filter out already-processed attachments
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id FROM attachments WHERE gmail_id = %s AND attachment_id = %s",
-                    (gmail_id, attachment_id),
+                    "SELECT attachment_id FROM attachments WHERE gmail_id = %s AND attachment_id = ANY(%s)",
+                    (gmail_id, attachment_ids),
                 )
-                if cur.fetchone():
-                    logger.debug(
-                        "Attachment already exists",
-                        gmail_id=gmail_id,
-                        attachment_id=attachment_id,
-                    )
-                    self._complete_job(job["id"])
-                    return True
+                existing = {row[0] for row in cur.fetchall()}
 
-            # Get metadata
-            metadata = self._get_attachment_metadata(gmail_id, attachment_id)
-            if not metadata:
-                logger.warning(
-                    "Attachment metadata not found",
+            remaining = [aid for aid in attachment_ids if aid not in existing]
+            if existing:
+                logger.debug(
+                    "Skipping already-processed attachments",
                     gmail_id=gmail_id,
-                    attachment_id=attachment_id,
+                    skipped=len(existing),
                 )
-                self._fail_job(
-                    job["id"], "Attachment metadata not found in raw_response"
-                )
-                return False
 
-            # Generate S3 key: attachments/{gmail_id}/{attachment_id_hash}/{filename}
-            # Sanitize filename to prevent path traversal attacks
-            raw_filename = metadata["filename"] or "attachment"
-            filename = os.path.basename(raw_filename)
-            # Hash the attachment_id to avoid special characters that Minio rejects
-            att_id_hash = hashlib.sha256(attachment_id.encode()).hexdigest()
-            s3_key = f"attachments/{gmail_id}/{att_id_hash}/{filename}"
-
-            # Choose upload strategy based on size
-            size_bytes = metadata["size"]
-            if size_bytes < MULTIPART_THRESHOLD_BYTES:
-                # Small file: fetch all at once and use simple upload
-                actual_size = self._upload_small_file_direct(
-                    s3_key, gmail_id, attachment_id, metadata["mime_type"]
-                )
-                if actual_size != size_bytes:
-                    logger.warning(
-                        "Attachment size mismatch for small file",
-                        s3_key=s3_key,
-                        expected_size=size_bytes,
-                        actual_size=actual_size,
-                        gmail_id=gmail_id,
-                    )
-
-                logger.info(
-                    "Stored small attachment",
-                    s3_key=s3_key,
-                    size_bytes=actual_size,
+            if not remaining:
+                logger.debug(
+                    "All attachments already processed",
                     gmail_id=gmail_id,
                 )
+                self._complete_job(job["id"])
+                return True
 
-            else:
-                # Large file: stream download and use multipart upload
-                logger.info(
-                    "Streaming large attachment",
-                    s3_key=s3_key,
-                    size_bytes=size_bytes,
-                    gmail_id=gmail_id,
-                )
-                actual_size = self._upload_large_file_streaming(
-                    s3_key, gmail_id, attachment_id, metadata["mime_type"]
-                )
-                if actual_size != size_bytes:
-                    logger.warning(
-                        "Attachment size mismatch for large file",
-                        s3_key=s3_key,
-                        expected_size=size_bytes,
-                        actual_size=actual_size,
-                        gmail_id=gmail_id,
-                    )
+            # Process each attachment
+            results: list[tuple[str, str, str, int]] = []
+            for attachment_id in remaining:
+                result = self._process_single_attachment(gmail_id, attachment_id)
+                results.append(result)
 
-                logger.info(
-                    "Stored large attachment",
-                    s3_key=s3_key,
-                    size_bytes=actual_size,
-                    gmail_id=gmail_id,
-                )
-
-            # Store record and complete job in single transaction for atomicity
+            # Store all records and complete job in single transaction
             conn = self._get_pg_conn()
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO attachments (
-                        gmail_id, attachment_id, filename, mime_type,
-                        size_bytes, s3_bucket, s3_key
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (gmail_id, attachment_id) DO UPDATE SET
-                        filename = EXCLUDED.filename,
-                        mime_type = EXCLUDED.mime_type,
-                        size_bytes = EXCLUDED.size_bytes,
-                        s3_bucket = EXCLUDED.s3_bucket,
-                        s3_key = EXCLUDED.s3_key
-                """,
-                    (
-                        gmail_id,
-                        attachment_id,
-                        filename,
-                        metadata["mime_type"],
-                        actual_size,
-                        self.config.s3_bucket,
-                        s3_key,
-                    ),
-                )
+                for attachment_id, filename, mime_type, actual_size in results:
+                    att_id_hash = hashlib.sha256(attachment_id.encode()).hexdigest()
+                    s3_key = f"attachments/{gmail_id}/{att_id_hash}/{filename}"
+                    cur.execute(
+                        """
+                        INSERT INTO attachments (
+                            gmail_id, attachment_id, filename, mime_type,
+                            size_bytes, s3_bucket, s3_key
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (gmail_id, attachment_id) DO UPDATE SET
+                            filename = EXCLUDED.filename,
+                            mime_type = EXCLUDED.mime_type,
+                            size_bytes = EXCLUDED.size_bytes,
+                            s3_bucket = EXCLUDED.s3_bucket,
+                            s3_key = EXCLUDED.s3_key
+                    """,
+                        (
+                            gmail_id,
+                            attachment_id,
+                            filename,
+                            mime_type,
+                            actual_size,
+                            self.config.s3_bucket,
+                            s3_key,
+                        ),
+                    )
                 cur.execute(
                     """
                     UPDATE queue
@@ -550,7 +580,6 @@ class AttachmentWorker:
             logger.error(
                 "Gmail API error",
                 gmail_id=gmail_id,
-                attachment_id=attachment_id,
                 error=str(e),
                 exc_info=True,
             )
@@ -558,9 +587,8 @@ class AttachmentWorker:
             return False
         except Exception as e:
             logger.error(
-                "Failed to process attachment",
+                "Failed to process attachments",
                 gmail_id=gmail_id,
-                attachment_id=attachment_id,
                 error=str(e),
                 exc_info=True,
             )
