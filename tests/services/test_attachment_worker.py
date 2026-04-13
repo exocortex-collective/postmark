@@ -91,18 +91,123 @@ def test_find_attachment_in_parts_not_found(worker: AttachmentWorker) -> None:
 
 
 def test_find_attachment_in_parts_missing_fields(worker: AttachmentWorker) -> None:
-    """Test default values when filename/mimeType/size are missing."""
+    """Test that parts without a filename are skipped (inline content)."""
     payload = {
         "body": {"attachmentId": "test123"}
-        # No filename, mimeType, or size fields
+        # No filename - this is inline content, not an attachment
+    }
+
+    result = worker._find_attachment_in_parts(payload, "test123")
+
+    assert result is None
+
+
+def test_find_attachment_in_parts_with_filename_defaults(
+    worker: AttachmentWorker,
+) -> None:
+    """Test default values when mimeType/size are missing but filename is present."""
+    payload = {
+        "body": {"attachmentId": "test123"},
+        "filename": "doc.bin",
+        # No mimeType or size fields
     }
 
     result = worker._find_attachment_in_parts(payload, "test123")
 
     assert result == {
-        "filename": "attachment",
+        "filename": "doc.bin",
         "mime_type": "application/octet-stream",
         "size": 0,
+    }
+
+
+def test_find_attachment_in_parts_inline_skipped(worker: AttachmentWorker) -> None:
+    """Test that inline parts (attachmentId but no filename) are skipped."""
+    payload = {
+        "body": {},
+        "parts": [
+            {
+                "body": {"attachmentId": "inline1", "size": 100},
+                "mimeType": "image/png",
+                # No filename - inline image
+            },
+            {
+                "body": {"attachmentId": "real1", "size": 200},
+                "filename": "report.pdf",
+                "mimeType": "application/pdf",
+            },
+        ],
+    }
+
+    # Inline part should be skipped
+    assert worker._find_attachment_in_parts(payload, "inline1") is None
+    # Real attachment should be found
+    result = worker._find_attachment_in_parts(payload, "real1")
+    assert result == {
+        "filename": "report.pdf",
+        "mime_type": "application/pdf",
+        "size": 200,
+    }
+
+
+def test_find_attachment_in_parts_multipart_mixed_with_alternative(
+    worker: AttachmentWorker,
+) -> None:
+    """Test finding attachment in multipart/mixed containing multipart/alternative.
+
+    This is a common real-world structure:
+    multipart/mixed
+      ├── multipart/alternative
+      │     ├── text/plain (body)
+      │     └── text/html  (body)
+      ├── application/pdf (attachment)
+      └── image/png       (attachment)
+    """
+    payload = {
+        "mimeType": "multipart/mixed",
+        "body": {},
+        "parts": [
+            {
+                "mimeType": "multipart/alternative",
+                "body": {},
+                "parts": [
+                    {
+                        "mimeType": "text/plain",
+                        "body": {"size": 100, "data": "base64text"},
+                        "filename": "",
+                    },
+                    {
+                        "mimeType": "text/html",
+                        "body": {"size": 200, "data": "base64html"},
+                        "filename": "",
+                    },
+                ],
+            },
+            {
+                "mimeType": "application/pdf",
+                "filename": "invoice.pdf",
+                "body": {"attachmentId": "att_pdf_1", "size": 50000},
+            },
+            {
+                "mimeType": "image/png",
+                "filename": "screenshot.png",
+                "body": {"attachmentId": "att_png_2", "size": 30000},
+            },
+        ],
+    }
+
+    result = worker._find_attachment_in_parts(payload, "att_pdf_1")
+    assert result == {
+        "filename": "invoice.pdf",
+        "mime_type": "application/pdf",
+        "size": 50000,
+    }
+
+    result = worker._find_attachment_in_parts(payload, "att_png_2")
+    assert result == {
+        "filename": "screenshot.png",
+        "mime_type": "image/png",
+        "size": 30000,
     }
 
 

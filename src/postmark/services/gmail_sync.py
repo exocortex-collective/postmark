@@ -366,9 +366,11 @@ class GmailSync:
                     WHERE queue_name IN ('parse', 'triage', 'actions')
                       AND status IN ('pending', 'processing');
 
-                -- For attachment: dedup by gmail_id + attachment_id
+                -- For attachment: dedup by gmail_id (one job per email)
+                -- Drop old index that included attachment_id; new definition drops it
+                DROP INDEX IF EXISTS idx_queue_dedup_attachment;
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_dedup_attachment
-                    ON queue(queue_name, (payload->>'gmail_id'), (payload->>'attachment_id'), created_at)
+                    ON queue(queue_name, (payload->>'gmail_id'), created_at)
                     WHERE queue_name = 'attachment'
                       AND status IN ('pending', 'processing');
 
@@ -498,13 +500,18 @@ class GmailSync:
             return cur.fetchone() is not None
 
     def _extract_attachment_ids(self, payload: dict[str, Any]) -> list[str]:
-        """Recursively extract attachment IDs from MIME parts."""
+        """Recursively extract attachment IDs from MIME parts.
+
+        Only includes parts that have both a non-empty filename and an
+        attachmentId in the body, filtering out inline content (e.g.
+        embedded images) that lack a filename.
+        """
         attachment_ids = []
 
         def recurse(part: dict[str, Any]) -> None:
             body = part.get("body", {})
-            if att_id := body.get("attachmentId"):
-                attachment_ids.append(att_id)
+            if part.get("filename") and body.get("attachmentId"):
+                attachment_ids.append(body["attachmentId"])
             for subpart in part.get("parts", []):
                 recurse(subpart)
 
@@ -653,9 +660,9 @@ class GmailSync:
                         (Json({"gmail_id": gmail_id}), priority, gmail_id),
                     )
 
-                    # Enqueue attachments for separate fetch (idempotent)
-                    # Uses INSERT ... WHERE NOT EXISTS for partitioned table compatibility
-                    for att_id in attachment_ids:
+                    # Enqueue one attachment job per email (idempotent)
+                    # Contains all attachment_ids for the message
+                    if attachment_ids:
                         cur.execute(
                             """
                             INSERT INTO queue (queue_name, payload, priority)
@@ -664,15 +671,18 @@ class GmailSync:
                                 SELECT 1 FROM queue
                                 WHERE queue_name = 'attachment'
                                   AND payload->>'gmail_id' = %s
-                                  AND payload->>'attachment_id' = %s
                                   AND status IN ('pending', 'processing')
                             )
                             """,
                             (
-                                Json({"gmail_id": gmail_id, "attachment_id": att_id}),
+                                Json(
+                                    {
+                                        "gmail_id": gmail_id,
+                                        "attachment_ids": attachment_ids,
+                                    }
+                                ),
                                 priority,
                                 gmail_id,
-                                att_id,
                             ),
                         )
 
