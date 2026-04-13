@@ -27,6 +27,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 from prometheus_client import Counter
+from psycopg2 import sql
 from psycopg2.extras import Json, execute_values
 from psycopg2.pool import ThreadedConnectionPool
 
@@ -88,9 +89,7 @@ def _partition_name(d: datetime) -> str:
     return f"emails_raw_response_{d.strftime('%Y_%m_%d')}"
 
 
-def _ensure_partitions(
-    cur: Any, reference_date: datetime | None = None
-) -> None:
+def _ensure_partitions(cur: Any, reference_date: datetime | None = None) -> None:
     """Create today's and tomorrow's partitions if they don't exist.
 
     Also drops partitions older than 7 days.
@@ -104,11 +103,9 @@ def _ensure_partitions(
         next_day = day + timedelta(days=1)
         name = _partition_name(day)
         cur.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {name}
-                PARTITION OF emails_raw_response
-                FOR VALUES FROM (%s) TO (%s)
-            """,
+            sql.SQL(
+                "CREATE TABLE IF NOT EXISTS {} PARTITION OF emails_raw_response FOR VALUES FROM (%s) TO (%s)"
+            ).format(sql.Identifier(name)),
             (day.isoformat(), next_day.isoformat()),
         )
 
@@ -116,7 +113,7 @@ def _ensure_partitions(
     for offset_days in range(7, 14):
         day = today - timedelta(days=offset_days)
         name = _partition_name(day)
-        cur.execute(f"DROP TABLE IF EXISTS {name}")
+        cur.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(name)))
 
 
 def _migrate_raw_response(cur: Any) -> None:
@@ -137,21 +134,43 @@ def _migrate_raw_response(cur: Any) -> None:
     if not has_source:
         return  # Nothing to migrate
 
+    # Batch migration to avoid long-running transactions at scale.
+    # Current deployment has ~13k rows; batching keeps memory and lock time bounded
+    # if the dataset grows before this one-time migration runs.
+    BATCH_SIZE = 10000
+    total_migrated = 0
     logger.info("Migrating raw_response data from emails_raw to emails_raw_response")
-    cur.execute(
-        """
-        INSERT INTO emails_raw_response (gmail_id, raw_response, created_at)
-        SELECT gmail_id, raw_response, COALESCE(created_at, NOW())
-        FROM emails_raw
-        WHERE raw_response IS NOT NULL
-        """
+    while True:
+        cur.execute(
+            """
+            INSERT INTO emails_raw_response (gmail_id, raw_response, created_at)
+            SELECT gmail_id, raw_response, COALESCE(created_at, NOW())
+            FROM emails_raw
+            WHERE raw_response IS NOT NULL
+            LIMIT %s
+            """,
+            (BATCH_SIZE,),
+        )
+        batch_count = cur.rowcount
+        if batch_count == 0:
+            break
+        # Null out migrated rows so next batch picks up the remainder
+        cur.execute(
+            """
+            UPDATE emails_raw SET raw_response = NULL
+            WHERE gmail_id IN (
+                SELECT gmail_id FROM emails_raw
+                WHERE raw_response IS NOT NULL
+                LIMIT %s
+            )
+            """,
+            (BATCH_SIZE,),
+        )
+        total_migrated += batch_count
+        logger.info(f"Migrated batch of {batch_count} rows ({total_migrated} total)")
+    logger.info(
+        f"Migration complete: {total_migrated} rows moved to emails_raw_response"
     )
-    migrated = cur.rowcount
-    logger.info(f"Migrated {migrated} rows to emails_raw_response")
-
-    # Null out raw_response in emails_raw after migration
-    cur.execute("UPDATE emails_raw SET raw_response = NULL WHERE raw_response IS NOT NULL")
-    logger.info(f"Cleared raw_response from {cur.rowcount} rows in emails_raw")
 
 
 @dataclass
@@ -733,13 +752,17 @@ class GmailSync:
                         ),
                     )
 
-                    # Store raw_response in partitioned table
+                    # Store raw_response in partitioned table (idempotent)
                     cur.execute(
                         """
                         INSERT INTO emails_raw_response (gmail_id, raw_response)
-                        VALUES (%s, %s)
+                        SELECT %s, %s
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM emails_raw_response
+                            WHERE gmail_id = %s
+                        )
                         """,
-                        (gmail_id, json.dumps(self._strip_body(msg))),
+                        (gmail_id, json.dumps(self._strip_body(msg)), gmail_id),
                     )
 
                     # Enqueue for parsing (idempotent - skips if already pending/processing)
