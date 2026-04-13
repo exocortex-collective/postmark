@@ -83,6 +83,77 @@ def is_retryable_http_error(error: HttpError) -> bool:
 logger = get_logger(__name__)
 
 
+def _partition_name(d: datetime) -> str:
+    """Return partition table name for a given date."""
+    return f"emails_raw_response_{d.strftime('%Y_%m_%d')}"
+
+
+def _ensure_partitions(
+    cur: Any, reference_date: datetime | None = None
+) -> None:
+    """Create today's and tomorrow's partitions if they don't exist.
+
+    Also drops partitions older than 7 days.
+    """
+    now = reference_date or datetime.now(timezone.utc)
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Create today and tomorrow partitions
+    for offset_days in (0, 1):
+        day = today + timedelta(days=offset_days)
+        next_day = day + timedelta(days=1)
+        name = _partition_name(day)
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {name}
+                PARTITION OF emails_raw_response
+                FOR VALUES FROM (%s) TO (%s)
+            """,
+            (day.isoformat(), next_day.isoformat()),
+        )
+
+    # Drop partitions older than 7 days
+    for offset_days in range(7, 14):
+        day = today - timedelta(days=offset_days)
+        name = _partition_name(day)
+        cur.execute(f"DROP TABLE IF EXISTS {name}")
+
+
+def _migrate_raw_response(cur: Any) -> None:
+    """One-time migration: copy raw_response from emails_raw to new table.
+
+    Only runs if the new partitioned table is empty and emails_raw has data.
+    Uses a flag approach: checks if new table has any rows before migrating.
+    """
+    cur.execute("SELECT EXISTS (SELECT 1 FROM emails_raw_response LIMIT 1)")
+    has_data = cur.fetchone()[0]
+    if has_data:
+        return  # Already migrated
+
+    cur.execute(
+        "SELECT EXISTS (SELECT 1 FROM emails_raw WHERE raw_response IS NOT NULL LIMIT 1)"
+    )
+    has_source = cur.fetchone()[0]
+    if not has_source:
+        return  # Nothing to migrate
+
+    logger.info("Migrating raw_response data from emails_raw to emails_raw_response")
+    cur.execute(
+        """
+        INSERT INTO emails_raw_response (gmail_id, raw_response, created_at)
+        SELECT gmail_id, raw_response, COALESCE(created_at, NOW())
+        FROM emails_raw
+        WHERE raw_response IS NOT NULL
+        """
+    )
+    migrated = cur.rowcount
+    logger.info(f"Migrated {migrated} rows to emails_raw_response")
+
+    # Null out raw_response in emails_raw after migration
+    cur.execute("UPDATE emails_raw SET raw_response = NULL WHERE raw_response IS NOT NULL")
+    logger.info(f"Cleared raw_response from {cur.rowcount} rows in emails_raw")
+
+
 @dataclass
 class PostgresConfig:
     """Postgres connection configuration."""
@@ -419,8 +490,27 @@ class GmailSync:
                 CREATE INDEX IF NOT EXISTS idx_backfill_jobs_pending
                     ON backfill_jobs(status, created_at)
                     WHERE status IN ('pending', 'running');
+
+                -- Partitioned table for raw_response data (moved out of emails_raw)
+                CREATE TABLE IF NOT EXISTS emails_raw_response (
+                    id BIGSERIAL,
+                    gmail_id TEXT NOT NULL,
+                    raw_response JSONB NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (id, created_at)
+                ) PARTITION BY RANGE (created_at);
+
+                CREATE INDEX IF NOT EXISTS idx_raw_response_gmail_id
+                    ON emails_raw_response(gmail_id);
             """
             )
+
+            # Ensure today's and tomorrow's partitions exist
+            _ensure_partitions(cur)
+
+            # Migrate existing raw_response data if the new table is empty
+            _migrate_raw_response(cur)
+
         logger.info("Postgres schema ensured")
 
     def _store_body_via_api(
@@ -619,14 +709,14 @@ class GmailSync:
         with self._get_conn() as conn:
             try:
                 with conn.cursor() as cur:
-                    # Store in Postgres
+                    # Store in Postgres (raw_response goes to partitioned table only)
                     cur.execute(
                         """
                         INSERT INTO emails_raw (
                             gmail_id, thread_id, history_id, label_ids,
                             internal_date, size_estimate, snippet, headers,
                             mime_type, attachment_ids, raw_response
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
                         ON CONFLICT (gmail_id) DO NOTHING
                         """,
                         (
@@ -640,8 +730,16 @@ class GmailSync:
                             json.dumps(payload.get("headers", [])),
                             payload.get("mimeType"),
                             attachment_ids,
-                            json.dumps(self._strip_body(msg)),
                         ),
+                    )
+
+                    # Store raw_response in partitioned table
+                    cur.execute(
+                        """
+                        INSERT INTO emails_raw_response (gmail_id, raw_response)
+                        VALUES (%s, %s)
+                        """,
+                        (gmail_id, json.dumps(self._strip_body(msg))),
                     )
 
                     # Enqueue for parsing (idempotent - skips if already pending/processing)
@@ -1553,6 +1651,20 @@ class GmailSync:
                 service="gmail-sync", error_type="backfill_check_failed"
             ).inc()
 
+    def _safe_maintain_partitions(self) -> None:
+        """Create/drop partitions for emails_raw_response. Won't crash scheduler."""
+        try:
+            with self._get_conn() as conn:
+                with conn.cursor() as cur:
+                    _ensure_partitions(cur)
+                conn.commit()
+            logger.debug("Partition maintenance completed")
+        except Exception as e:
+            logger.error(f"Error maintaining partitions: {e}", exc_info=True)
+            ERRORS.labels(
+                service="gmail-sync", error_type="partition_maintenance_failed"
+            ).inc()
+
     def run(self) -> None:
         """Main entry point - start the service."""
         logger.info("Starting Gmail sync service")
@@ -1567,6 +1679,8 @@ class GmailSync:
         schedule.every().hour.do(self.fallback_poll)
         # Check for queued backfill jobs every minute
         schedule.every(1).minutes.do(self._safe_check_backfill_queue)
+        # Maintain raw_response partitions daily (create tomorrow's, drop old)
+        schedule.every().day.at("00:05").do(self._safe_maintain_partitions)
 
         # Start scheduler in background thread
         scheduler_thread = threading.Thread(target=self.run_scheduler, daemon=True)
