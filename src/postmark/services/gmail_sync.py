@@ -109,23 +109,45 @@ def _ensure_partitions(cur: Any, reference_date: datetime | None = None) -> None
             (day.isoformat(), next_day.isoformat()),
         )
 
-    # Drop partitions older than 7 days
-    for offset_days in range(7, 14):
-        day = today - timedelta(days=offset_days)
-        name = _partition_name(day)
-        cur.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(name)))
+    # Drop partitions older than 7 days by querying pg_inherits
+    cutoff = today - timedelta(days=7)
+    cur.execute(
+        """
+        SELECT c.relname
+        FROM pg_inherits i
+        JOIN pg_class c ON c.oid = i.inhrelid
+        JOIN pg_class p ON p.oid = i.inhparent
+        WHERE p.relname = 'emails_raw_response'
+        """
+    )
+    for (partition_name,) in cur.fetchall():
+        try:
+            date_str = partition_name.replace("emails_raw_response_", "").replace(
+                "_", "-"
+            )
+            partition_date = datetime.strptime(date_str, "%Y-%m-%d").replace(
+                tzinfo=timezone.utc
+            )
+            if partition_date < cutoff:
+                cur.execute(
+                    sql.SQL("DROP TABLE IF EXISTS {}").format(
+                        sql.Identifier(partition_name)
+                    )
+                )
+                logger.info(f"Dropped old partition: {partition_name}")
+        except ValueError:
+            continue
 
 
 def _migrate_raw_response(cur: Any) -> None:
-    """One-time migration: copy raw_response from emails_raw to new table.
+    """Migrate raw_response from emails_raw to the partitioned table.
 
-    Only runs if the new partitioned table is empty and emails_raw has data.
-    Uses a flag approach: checks if new table has any rows before migrating.
+    Runs in batches using a CTE for atomicity — the INSERT and UPDATE
+    target the same rows in a single statement. Safe to run multiple
+    times and resumable after interruption (uses WHERE raw_response IS NOT NULL).
+    Commits after each batch to keep transaction size bounded.
     """
-    cur.execute("SELECT EXISTS (SELECT 1 FROM emails_raw_response LIMIT 1)")
-    has_data = cur.fetchone()[0]
-    if has_data:
-        return  # Already migrated
+    BATCH_SIZE = 1000
 
     cur.execute(
         "SELECT EXISTS (SELECT 1 FROM emails_raw WHERE raw_response IS NOT NULL LIMIT 1)"
@@ -134,43 +156,41 @@ def _migrate_raw_response(cur: Any) -> None:
     if not has_source:
         return  # Nothing to migrate
 
-    # Batch migration to avoid long-running transactions at scale.
-    # Current deployment has ~13k rows; batching keeps memory and lock time bounded
-    # if the dataset grows before this one-time migration runs.
-    BATCH_SIZE = 10000
     total_migrated = 0
     logger.info("Migrating raw_response data from emails_raw to emails_raw_response")
+
     while True:
         cur.execute(
             """
-            INSERT INTO emails_raw_response (gmail_id, raw_response, created_at)
-            SELECT gmail_id, raw_response, COALESCE(created_at, NOW())
-            FROM emails_raw
-            WHERE raw_response IS NOT NULL
-            LIMIT %s
+            WITH moved AS (
+                SELECT gmail_id, raw_response
+                FROM emails_raw
+                WHERE raw_response IS NOT NULL
+                LIMIT %s
+            ),
+            inserted AS (
+                INSERT INTO emails_raw_response (gmail_id, raw_response, created_at)
+                SELECT gmail_id, raw_response, NOW()
+                FROM moved
+                RETURNING gmail_id
+            )
+            UPDATE emails_raw
+            SET raw_response = NULL
+            WHERE gmail_id IN (SELECT gmail_id FROM inserted)
             """,
             (BATCH_SIZE,),
         )
         batch_count = cur.rowcount
         if batch_count == 0:
             break
-        # Null out migrated rows so next batch picks up the remainder
-        cur.execute(
-            """
-            UPDATE emails_raw SET raw_response = NULL
-            WHERE gmail_id IN (
-                SELECT gmail_id FROM emails_raw
-                WHERE raw_response IS NOT NULL
-                LIMIT %s
-            )
-            """,
-            (BATCH_SIZE,),
-        )
+        cur.connection.commit()
         total_migrated += batch_count
         logger.info(f"Migrated batch of {batch_count} rows ({total_migrated} total)")
-    logger.info(
-        f"Migration complete: {total_migrated} rows moved to emails_raw_response"
-    )
+
+    if total_migrated > 0:
+        logger.info(
+            f"Migration complete: {total_migrated} rows moved to emails_raw_response"
+        )
 
 
 @dataclass

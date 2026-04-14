@@ -286,7 +286,7 @@ class AttachmentWorker:
     def _delete_raw_response(self, gmail_id: str) -> None:
         """Delete raw_response from partitioned table after attachment processing."""
         conn = self._get_pg_conn()
-        created_at = getattr(self, "_raw_response_created_at", {}).get(gmail_id)
+        created_at = getattr(self, "_raw_response_created_at", {}).pop(gmail_id, None)
         with conn.cursor() as cur:
             if created_at:
                 # Partition-pruned delete (targets specific partition)
