@@ -210,12 +210,16 @@ class AttachmentWorker:
         # Try new partitioned table first
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT raw_response FROM emails_raw_response WHERE gmail_id = %s LIMIT 1",
+                "SELECT raw_response, created_at FROM emails_raw_response WHERE gmail_id = %s LIMIT 1",
                 (gmail_id,),
             )
             row = cur.fetchone()
             if row and row[0]:
                 raw_response = row[0]
+                # Cache created_at for partition-pruned DELETE later
+                if not hasattr(self, "_raw_response_created_at"):
+                    self._raw_response_created_at = {}
+                self._raw_response_created_at[gmail_id] = row[1]
 
         # Fallback: try legacy emails_raw column
         if raw_response is None:
@@ -282,11 +286,20 @@ class AttachmentWorker:
     def _delete_raw_response(self, gmail_id: str) -> None:
         """Delete raw_response from partitioned table after attachment processing."""
         conn = self._get_pg_conn()
+        created_at = getattr(self, "_raw_response_created_at", {}).get(gmail_id)
         with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM emails_raw_response WHERE gmail_id = %s",
-                (gmail_id,),
-            )
+            if created_at:
+                # Partition-pruned delete (targets specific partition)
+                cur.execute(
+                    "DELETE FROM emails_raw_response WHERE gmail_id = %s AND created_at = %s",
+                    (gmail_id, created_at),
+                )
+            else:
+                # Fallback: scan all partitions
+                cur.execute(
+                    "DELETE FROM emails_raw_response WHERE gmail_id = %s",
+                    (gmail_id,),
+                )
             if cur.rowcount > 0:
                 logger.debug(
                     "Deleted raw_response after processing",
