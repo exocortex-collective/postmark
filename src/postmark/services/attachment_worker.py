@@ -198,22 +198,66 @@ class AttachmentWorker:
     def _get_attachment_metadata(
         self, gmail_id: str, attachment_id: str
     ) -> dict[str, Any] | None:
-        """Get attachment metadata from emails_raw."""
+        """Get attachment metadata from emails_raw_response (or Gmail API fallback).
+
+        Tries the partitioned emails_raw_response table first.
+        Falls back to emails_raw for pre-migration data.
+        Falls back to Gmail API if neither has the data.
+        """
         conn = self._get_pg_conn()
+        raw_response = None
+
+        # Try new partitioned table first
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT raw_response FROM emails_raw WHERE gmail_id = %s",
+                "SELECT raw_response, created_at FROM emails_raw_response WHERE gmail_id = %s LIMIT 1",
                 (gmail_id,),
             )
             row = cur.fetchone()
-            if not row or not row[0]:
+            if row and row[0]:
+                raw_response = row[0]
+                # Cache created_at for partition-pruned DELETE later
+                if not hasattr(self, "_raw_response_created_at"):
+                    self._raw_response_created_at = {}
+                self._raw_response_created_at[gmail_id] = row[1]
+
+        # Fallback: try legacy emails_raw column
+        if raw_response is None:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT raw_response FROM emails_raw WHERE gmail_id = %s",
+                    (gmail_id,),
+                )
+                row = cur.fetchone()
+                if row and row[0]:
+                    raw_response = row[0]
+
+        # Fallback: fetch from Gmail API directly
+        if raw_response is None:
+            logger.info(
+                "raw_response not in DB, fetching from Gmail API",
+                gmail_id=gmail_id,
+            )
+            try:
+                gmail = self._get_gmail_service()
+                raw_response = (
+                    gmail.users()
+                    .messages()
+                    .get(userId="me", id=gmail_id, format="full")
+                    .execute()
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to fetch message from Gmail API",
+                    gmail_id=gmail_id,
+                    error=str(e),
+                )
                 return None
 
-            # Recursively search all nested MIME parts for the attachment
-            raw_response = row[0]
-            return self._find_attachment_in_parts(
-                raw_response.get("payload", {}), attachment_id
-            )
+        # Recursively search all nested MIME parts for the attachment
+        return self._find_attachment_in_parts(
+            raw_response.get("payload", {}), attachment_id
+        )
 
     def _find_attachment_in_parts(
         self, payload: dict[str, Any], attachment_id: str
@@ -238,6 +282,31 @@ class AttachmentWorker:
                 return result
 
         return None
+
+    def _delete_raw_response(self, gmail_id: str) -> None:
+        """Delete raw_response from partitioned table after attachment processing."""
+        conn = self._get_pg_conn()
+        created_at = getattr(self, "_raw_response_created_at", {}).pop(gmail_id, None)
+        with conn.cursor() as cur:
+            if created_at:
+                # Partition-pruned delete (targets specific partition)
+                cur.execute(
+                    "DELETE FROM emails_raw_response WHERE gmail_id = %s AND created_at = %s",
+                    (gmail_id, created_at),
+                )
+            else:
+                # Fallback: scan all partitions
+                cur.execute(
+                    "DELETE FROM emails_raw_response WHERE gmail_id = %s",
+                    (gmail_id,),
+                )
+            if cur.rowcount > 0:
+                logger.debug(
+                    "Deleted raw_response after processing",
+                    gmail_id=gmail_id,
+                    rows_deleted=cur.rowcount,
+                )
+            conn.commit()
 
     def _complete_job(self, job_id: int) -> None:
         """Mark job as completed."""
@@ -519,6 +588,14 @@ class AttachmentWorker:
                     gmail_id=gmail_id,
                 )
                 self._complete_job(job["id"])
+                try:
+                    self._delete_raw_response(gmail_id)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to delete raw_response after skip",
+                        gmail_id=gmail_id,
+                        error=str(e),
+                    )
                 return True
 
             # Process each attachment
@@ -565,6 +642,17 @@ class AttachmentWorker:
                     (job["id"],),
                 )
                 conn.commit()
+
+            # Clean up raw_response now that all attachments are processed
+            try:
+                self._delete_raw_response(gmail_id)
+            except Exception as e:
+                # Non-fatal: raw_response cleanup failure shouldn't fail the job
+                logger.warning(
+                    "Failed to delete raw_response after processing",
+                    gmail_id=gmail_id,
+                    error=str(e),
+                )
 
             # Record processing duration
             PROCESSING_DURATION.labels(queue="attachment", operation="process").observe(
