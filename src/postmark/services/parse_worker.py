@@ -341,6 +341,7 @@ class ParseWorker:
     def _fail_job(self, job_id: int, error: str) -> None:
         """Schedule a retry with backoff, or mark failed if attempts exhausted."""
         conn = self._get_pg_conn()
+        conn.rollback()
         fail_or_retry(conn, job_id, error, max_attempts=MAX_ATTEMPTS)
         conn.commit()
 
