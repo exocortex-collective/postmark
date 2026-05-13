@@ -34,7 +34,7 @@ logger = get_logger(__name__)
 # How long a job can be in 'processing' before it's considered stale
 # and reset to 'pending' (visibility timeout)
 VISIBILITY_TIMEOUT_MINUTES = 5
-MAX_ATTEMPTS = 3
+MAX_ATTEMPTS = 4
 
 
 @dataclass

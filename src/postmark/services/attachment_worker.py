@@ -37,7 +37,7 @@ logger = get_logger(__name__)
 # How long a job can be in 'processing' before it's considered stale
 # and reset to 'pending' (visibility timeout)
 VISIBILITY_TIMEOUT_MINUTES = 5
-MAX_ATTEMPTS = 3
+MAX_ATTEMPTS = 4
 
 # S3 multipart upload threshold (use multipart for files > 10MB)
 # AWS best practice is 10MB, reduces memory usage for large files
