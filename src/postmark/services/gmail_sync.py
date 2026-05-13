@@ -448,10 +448,14 @@ class GmailSync:
                     created_at TIMESTAMPTZ DEFAULT NOW(),
                     claimed_at TIMESTAMPTZ,
                     completed_at TIMESTAMPTZ,
+                    next_attempt_at TIMESTAMPTZ,
                     CONSTRAINT valid_status CHECK (
                         status IN ('pending', 'processing', 'completed', 'failed', 'cancelled')
                     )
                 );
+
+                -- Migration: add next_attempt_at for retry backoff
+                ALTER TABLE queue ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ;
 
                 -- Drop old index superseded by priority-aware index
                 DROP INDEX IF EXISTS idx_queue_pending;
