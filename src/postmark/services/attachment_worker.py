@@ -24,6 +24,7 @@ from cortex_utils.metrics import (
     QUEUE_PROCESSED,
     start_metrics_server,
 )
+from cortex_utils.queue.retry import fail_or_retry, ready_predicate
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
@@ -36,6 +37,7 @@ logger = get_logger(__name__)
 # How long a job can be in 'processing' before it's considered stale
 # and reset to 'pending' (visibility timeout)
 VISIBILITY_TIMEOUT_MINUTES = 5
+MAX_ATTEMPTS = 3
 
 # S3 multipart upload threshold (use multipart for files > 10MB)
 # AWS best practice is 10MB, reduces memory usage for large files
@@ -166,7 +168,7 @@ class AttachmentWorker:
         with conn.cursor() as cur:
             # Reset stale jobs and claim new ones in a single transaction
             cur.execute(
-                """
+                f"""
                 WITH reset_stale AS (
                     UPDATE queue
                     SET status = 'pending', claimed_at = NULL
@@ -177,6 +179,7 @@ class AttachmentWorker:
                 claimable AS (
                     SELECT id FROM queue
                     WHERE queue_name = 'attachment' AND status = 'pending'
+                      AND {ready_predicate()}
                     ORDER BY priority DESC, created_at
                     LIMIT %s
                     FOR UPDATE SKIP LOCKED
@@ -323,20 +326,10 @@ class AttachmentWorker:
             conn.commit()
 
     def _fail_job(self, job_id: int, error: str) -> None:
-        """Mark job as failed."""
+        """Schedule a retry with backoff, or mark failed if attempts exhausted."""
         conn = self._get_pg_conn()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE queue
-                SET status = 'failed',
-                    last_error = %s,
-                    attempts = attempts + 1
-                WHERE id = %s
-            """,
-                (error[:1000], job_id),
-            )
-            conn.commit()
+        fail_or_retry(conn, job_id, error, max_attempts=MAX_ATTEMPTS)
+        conn.commit()
 
     def _upload_small_file(self, s3_key: str, data: bytes, mime_type: str) -> None:
         """Upload small file using simple put_object."""

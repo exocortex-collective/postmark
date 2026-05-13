@@ -20,6 +20,7 @@ from cortex_utils.metrics import (
     QUEUE_PROCESSED,
     start_metrics_server,
 )
+from cortex_utils.queue.retry import fail_or_retry, ready_predicate
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from psycopg2.extras import Json, execute_values
@@ -33,6 +34,7 @@ logger = get_logger(__name__)
 # How long a job can be in 'processing' before it's considered stale
 # and reset to 'pending' (visibility timeout)
 VISIBILITY_TIMEOUT_MINUTES = 5
+MAX_ATTEMPTS = 3
 
 
 @dataclass
@@ -222,7 +224,7 @@ class ParseWorker:
         with conn.cursor() as cur:
             # Reset stale jobs and claim new ones in a single transaction
             cur.execute(
-                """
+                f"""
                 WITH reset_stale AS (
                     UPDATE queue
                     SET status = 'pending', claimed_at = NULL
@@ -233,6 +235,7 @@ class ParseWorker:
                 claimable AS (
                     SELECT id FROM queue
                     WHERE queue_name = 'parse' AND status = 'pending'
+                      AND {ready_predicate()}
                     ORDER BY priority DESC, created_at
                     LIMIT %s
                     FOR UPDATE SKIP LOCKED
@@ -336,20 +339,10 @@ class ParseWorker:
             conn.commit()
 
     def _fail_job(self, job_id: int, error: str) -> None:
-        """Mark job as failed."""
+        """Schedule a retry with backoff, or mark failed if attempts exhausted."""
         conn = self._get_pg_conn()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE queue
-                SET status = 'failed',
-                    last_error = %s,
-                    attempts = attempts + 1
-                WHERE id = %s
-            """,
-                (error[:1000], job_id),
-            )  # Truncate error to 1000 chars
-            conn.commit()
+        fail_or_retry(conn, job_id, error, max_attempts=MAX_ATTEMPTS)
+        conn.commit()
 
     def _enqueue_triage(self, gmail_id: str, priority: int = 0) -> None:
         """Enqueue email for triage (idempotent - skips if already pending/processing).
