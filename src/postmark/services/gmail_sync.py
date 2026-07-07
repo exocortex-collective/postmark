@@ -1090,7 +1090,9 @@ class GmailSync:
         def diverges(name: str) -> bool:
             if event_type == "added":
                 return name not in expected
-            return name in expected  # removed a label triage had assigned
+            if event_type == "removed":
+                return name in expected  # removed a label triage had assigned
+            return False
 
         divergent = [name for name in changed if diverges(name)]
         if not divergent:
