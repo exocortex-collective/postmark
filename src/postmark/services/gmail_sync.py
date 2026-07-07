@@ -14,6 +14,14 @@ from typing import Any
 
 import psycopg2
 import schedule
+from cortex_utils.learning import (
+    ADD,
+    REMOVE,
+    active_label_prefix,
+    ensure_learning_schema,
+    expected_cortex_labels,
+    record_learning_opportunity,
+)
 from cortex_utils.logging import configure_logging, get_logger
 from cortex_utils.metrics import (
     EMAILS_SYNCED,
@@ -554,6 +562,10 @@ class GmailSync:
             # Migrate existing raw_response data if the new table is empty
             _migrate_raw_response(cur)
 
+        # Learning-opportunity table for teach-by-labeling (cortex-uo9b).
+        # Does not commit; the caller commits the whole schema block.
+        ensure_learning_schema(conn)
+
         logger.info("Postgres schema ensured")
 
     def _store_body_via_api(
@@ -1020,6 +1032,12 @@ class GmailSync:
                             actions_to_enqueue,
                         )
 
+                # Detect teaching signals (manual label divergence) in the
+                # same transaction so they commit atomically with the update.
+                self._detect_learning_opportunities(
+                    conn, gmail_id, label_ids, event_type
+                )
+
                 # Commit the label event transaction
                 conn.commit()
 
@@ -1029,6 +1047,84 @@ class GmailSync:
                     f"Failed to process label event for {gmail_id}, rolled back: {e}"
                 )
                 raise
+
+    def _detect_learning_opportunities(
+        self,
+        conn: psycopg2.extensions.connection,
+        gmail_id: str,
+        label_ids: list[str],
+        event_type: str,
+    ) -> None:
+        """Record a learning opportunity when a manual label change diverges
+        from triage's classification (cortex-uo9b.1).
+
+        A managed-prefix label that a human adds but triage did not assign — or
+        removes that triage did assign — is a teaching signal. Machine labels
+        always match the classification, so they align and are ignored with no
+        attribution ledger. Labels on emails triage has not classified yet are
+        noise (gmail-sync sees mail before the user does) and are skipped.
+        """
+        if not label_ids:
+            return
+
+        # Gate each DB query on the cheaper check before it: managed-label
+        # filter (cached label names) before the classification lookup, and
+        # both before the sender lookup.
+        prefix = active_label_prefix(conn)
+
+        def is_managed(name: str) -> bool:
+            return not prefix or name.startswith(f"{prefix}/")
+
+        changed = [
+            name
+            for label_id in label_ids
+            if (name := self._get_label_name(label_id)) and is_managed(name)
+        ]
+        if not changed:
+            return  # only non-managed labels changed — not a teaching signal
+
+        expected = expected_cortex_labels(conn, gmail_id, prefix=prefix)
+        if expected is None:
+            return  # not triaged yet -> noise
+
+        def diverges(name: str) -> bool:
+            if event_type == "added":
+                return name not in expected
+            if event_type == "removed":
+                return name in expected  # removed a label triage had assigned
+            return False
+
+        divergent = [name for name in changed if diverges(name)]
+        if not divergent:
+            return  # aligned (e.g. machine labeling) — skip the sender lookup
+
+        sender = self._get_sender_addr(conn, gmail_id)
+        direction = ADD if event_type == "added" else REMOVE
+        for name in divergent:
+            if record_learning_opportunity(
+                conn,
+                gmail_id=gmail_id,
+                label=name,
+                direction=direction,
+                sender=sender,
+                expected_labels=expected,
+            ):
+                logger.info(
+                    f"Learning opportunity: {event_type} {name} on {gmail_id} "
+                    f"(sender={sender}) diverges from classification"
+                )
+
+    def _get_sender_addr(
+        self, conn: psycopg2.extensions.connection, gmail_id: str
+    ) -> str | None:
+        """Look up the parsed sender address for an email, if available."""
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT from_addr FROM emails_parsed WHERE gmail_id = %s",
+                (gmail_id,),
+            )
+            row = cur.fetchone()
+        return row[0] if row else None
 
     def _process_message_deleted(self, gmail_id: str) -> None:
         """Soft delete a message and cancel pending queue jobs.
