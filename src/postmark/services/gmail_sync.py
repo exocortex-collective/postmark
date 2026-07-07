@@ -1064,26 +1064,35 @@ class GmailSync:
         attribution ledger. Labels on emails triage has not classified yet are
         noise (gmail-sync sees mail before the user does) and are skipped.
         """
+        if not label_ids:
+            return
+
+        # Gate each DB query on the cheaper check before it: managed-label
+        # filter (cached label names) before the classification lookup, and
+        # both before the sender lookup.
         prefix = active_label_prefix(conn)
-        expected = expected_cortex_labels(conn, gmail_id, prefix=prefix)
-        if expected is None:
-            return  # not triaged yet -> noise
 
         def is_managed(name: str) -> bool:
             return not prefix or name.startswith(f"{prefix}/")
+
+        changed = [
+            name
+            for label_id in label_ids
+            if (name := self._get_label_name(label_id)) and is_managed(name)
+        ]
+        if not changed:
+            return  # only non-managed labels changed — not a teaching signal
+
+        expected = expected_cortex_labels(conn, gmail_id, prefix=prefix)
+        if expected is None:
+            return  # not triaged yet -> noise
 
         def diverges(name: str) -> bool:
             if event_type == "added":
                 return name not in expected
             return name in expected  # removed a label triage had assigned
 
-        divergent = [
-            name
-            for label_id in label_ids
-            if (name := self._get_label_name(label_id))
-            and is_managed(name)
-            and diverges(name)
-        ]
+        divergent = [name for name in changed if diverges(name)]
         if not divergent:
             return  # aligned (e.g. machine labeling) — skip the sender lookup
 
