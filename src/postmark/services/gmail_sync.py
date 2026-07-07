@@ -1072,22 +1072,24 @@ class GmailSync:
         def is_managed(name: str) -> bool:
             return not prefix or name.startswith(f"{prefix}/")
 
-        changed = [
+        def diverges(name: str) -> bool:
+            if event_type == "added":
+                return name not in expected
+            return name in expected  # removed a label triage had assigned
+
+        divergent = [
             name
             for label_id in label_ids
-            if (name := self._get_label_name(label_id)) and is_managed(name)
+            if (name := self._get_label_name(label_id))
+            and is_managed(name)
+            and diverges(name)
         ]
-        if not changed:
-            return
+        if not divergent:
+            return  # aligned (e.g. machine labeling) — skip the sender lookup
 
         sender = self._get_sender_addr(conn, gmail_id)
-        for name in changed:
-            diverges = (event_type == "added" and name not in expected) or (
-                event_type == "removed" and name in expected
-            )
-            if not diverges:
-                continue
-            direction = ADD if event_type == "added" else REMOVE
+        direction = ADD if event_type == "added" else REMOVE
+        for name in divergent:
             if record_learning_opportunity(
                 conn,
                 gmail_id=gmail_id,
