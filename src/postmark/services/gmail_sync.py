@@ -224,6 +224,10 @@ class GmailSyncConfig:
     gmail_token_path: str
     duckdb_api_url: str
     postgres: PostgresConfig
+    # Enqueue Cortex/* label events to the actions queue for workflow dispatch.
+    # Off by default: there is no actions consumer yet, so enabling it only
+    # grows the queue unbounded. Flip on when the actions service exists.
+    actions_queue_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "GmailSyncConfig":
@@ -234,6 +238,8 @@ class GmailSyncConfig:
             topic_name=os.environ["PUBSUB_TOPIC"],
             gmail_token_path=os.environ["GMAIL_TOKEN_PATH"],
             duckdb_api_url=os.environ["DUCKDB_API_URL"],
+            actions_queue_enabled=os.environ.get("ACTIONS_QUEUE_ENABLED", "").lower()
+            in ("1", "true", "yes"),
             postgres=PostgresConfig(
                 host=os.environ["POSTGRES_HOST"],
                 port=int(os.environ.get("POSTGRES_PORT", "5432")),
@@ -968,25 +974,28 @@ class GmailSync:
 
         # Collect Cortex/* labels for bulk enqueue to actions service
         # (Do this first, before starting transaction, as it may call _sync_labels_to_db)
+        # Gated behind actions_queue_enabled: with no consumer, enqueueing only
+        # grows the queue unbounded (see cortex-s8sd).
         actions_to_enqueue = []
-        for label_id in label_ids:
-            label_name = self._get_label_name(label_id)
-            if label_name is None:
-                continue
+        if self.config.actions_queue_enabled:
+            for label_id in label_ids:
+                label_name = self._get_label_name(label_id)
+                if label_name is None:
+                    continue
 
-            # Only enqueue Cortex/* labels for workflow dispatch
-            if not label_name.startswith("Cortex/"):
-                continue
+                # Only enqueue Cortex/* labels for workflow dispatch
+                if not label_name.startswith("Cortex/"):
+                    continue
 
-            logger.info(f"Label {event_type}: {label_name} on message {gmail_id}")
-            payload = Json(
-                {
-                    "gmail_id": gmail_id,
-                    "label": label_name,
-                    "event_type": event_type,
-                }
-            )
-            actions_to_enqueue.append(("actions", payload))
+                logger.info(f"Label {event_type}: {label_name} on message {gmail_id}")
+                payload = Json(
+                    {
+                        "gmail_id": gmail_id,
+                        "label": label_name,
+                        "event_type": event_type,
+                    }
+                )
+                actions_to_enqueue.append(("actions", payload))
 
         with self._get_conn() as conn:
             try:
