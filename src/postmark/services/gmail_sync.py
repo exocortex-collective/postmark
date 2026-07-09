@@ -1100,9 +1100,12 @@ class GmailSync:
         # The default label (e.g. Cortex/Uncategorized) is stripped automatically
         # by the labeling worker's reconciliation whenever a real label is
         # applied, so its removal is not a teaching signal — never propose to
-        # "stop labeling as <default>".
-        default = active_default_label(conn)
-        default_full = f"{prefix}/{default}" if prefix else default
+        # "stop labeling as <default>". Only needed for removals, so (per the
+        # gate-each-query convention above) the lookup is skipped for adds.
+        default_full: str | None = None
+        if event_type == "removed":
+            default = active_default_label(conn)
+            default_full = f"{prefix}/{default}" if prefix else default
 
         def diverges(name: str) -> bool:
             if event_type == "added":
