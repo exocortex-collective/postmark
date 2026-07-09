@@ -25,6 +25,7 @@ def patched(monkeypatch: pytest.MonkeyPatch):
     """Patch the cortex-utils helpers used by the detector; return (recorder, set_expected)."""
     rec = MagicMock(return_value=True)
     monkeypatch.setattr(gs, "active_label_prefix", lambda conn: "Cortex")
+    monkeypatch.setattr(gs, "active_default_label", lambda conn: "Uncategorized")
     monkeypatch.setattr(gs, "record_learning_opportunity", rec)
 
     def set_expected(value: set[str] | None) -> None:
@@ -79,6 +80,41 @@ def test_removed_not_assigned_ignored(patched) -> None:
     set_expected({"Cortex/A"})
     sync = make_sync({"L_B": "Cortex/B"})
     sync._detect_learning_opportunities(MagicMock(), "g1", ["L_B"], "removed")
+    rec.assert_not_called()
+
+
+def test_removed_default_label_ignored(patched) -> None:
+    # Removing the default label (Cortex/Uncategorized) is automatic
+    # reconciliation when a real label is applied, not a teaching signal —
+    # so it must not generate a "stop labeling as Uncategorized" proposal.
+    rec, set_expected = patched
+    set_expected({"Cortex/Uncategorized"})
+    sync = make_sync({"L_U": "Cortex/Uncategorized"})
+    sync._detect_learning_opportunities(MagicMock(), "g1", ["L_U"], "removed")
+    rec.assert_not_called()
+
+
+def test_removed_default_and_real_label_records_only_real(patched) -> None:
+    # A single event removing both the default label and a real one: the filter
+    # is surgical — it drops only the default, still recording the real remove.
+    rec, set_expected = patched
+    set_expected({"Cortex/Uncategorized", "Cortex/A"})
+    sync = make_sync({"L_U": "Cortex/Uncategorized", "L_A": "Cortex/A"})
+    sync._detect_learning_opportunities(MagicMock(), "g1", ["L_U", "L_A"], "removed")
+    rec.assert_called_once()
+    assert rec.call_args.kwargs["label"] == "Cortex/A"
+
+
+def test_removed_default_label_empty_prefix_ignored(
+    patched, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Empty prefix (manage all): default_full is the bare default name, and its
+    # removal is still skipped — exercises the `else default` branch.
+    rec, set_expected = patched
+    monkeypatch.setattr(gs, "active_label_prefix", lambda conn: "")
+    set_expected({"Uncategorized"})
+    sync = make_sync({"L_U": "Uncategorized"})
+    sync._detect_learning_opportunities(MagicMock(), "g1", ["L_U"], "removed")
     rec.assert_not_called()
 
 
