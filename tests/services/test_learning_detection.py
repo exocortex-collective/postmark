@@ -25,6 +25,7 @@ def patched(monkeypatch: pytest.MonkeyPatch):
     """Patch the cortex-utils helpers used by the detector; return (recorder, set_expected)."""
     rec = MagicMock(return_value=True)
     monkeypatch.setattr(gs, "active_label_prefix", lambda conn: "Cortex")
+    monkeypatch.setattr(gs, "active_default_label", lambda conn: "Uncategorized")
     monkeypatch.setattr(gs, "record_learning_opportunity", rec)
 
     def set_expected(value: set[str] | None) -> None:
@@ -79,6 +80,17 @@ def test_removed_not_assigned_ignored(patched) -> None:
     set_expected({"Cortex/A"})
     sync = make_sync({"L_B": "Cortex/B"})
     sync._detect_learning_opportunities(MagicMock(), "g1", ["L_B"], "removed")
+    rec.assert_not_called()
+
+
+def test_removed_default_label_ignored(patched) -> None:
+    # Removing the default label (Cortex/Uncategorized) is automatic
+    # reconciliation when a real label is applied, not a teaching signal —
+    # so it must not generate a "stop labeling as Uncategorized" proposal.
+    rec, set_expected = patched
+    set_expected({"Cortex/Uncategorized"})
+    sync = make_sync({"L_U": "Cortex/Uncategorized"})
+    sync._detect_learning_opportunities(MagicMock(), "g1", ["L_U"], "removed")
     rec.assert_not_called()
 
 

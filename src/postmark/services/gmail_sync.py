@@ -17,6 +17,7 @@ import schedule
 from cortex_utils.learning import (
     ADD,
     REMOVE,
+    active_default_label,
     active_label_prefix,
     ensure_learning_schema,
     expected_cortex_labels,
@@ -1096,11 +1097,19 @@ class GmailSync:
         if expected is None:
             return  # not triaged yet -> noise
 
+        # The default label (e.g. Cortex/Uncategorized) is stripped automatically
+        # by the labeling worker's reconciliation whenever a real label is
+        # applied, so its removal is not a teaching signal — never propose to
+        # "stop labeling as <default>".
+        default = active_default_label(conn)
+        default_full = f"{prefix}/{default}" if prefix else default
+
         def diverges(name: str) -> bool:
             if event_type == "added":
                 return name not in expected
             if event_type == "removed":
-                return name in expected  # removed a label triage had assigned
+                # removed a label triage had assigned, except the default label
+                return name in expected and name != default_full
             return False
 
         divergent = [name for name in changed if diverges(name)]
