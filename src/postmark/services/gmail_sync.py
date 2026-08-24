@@ -30,6 +30,7 @@ from cortex_utils.metrics import (
     QUEUE_PROCESSED,
     start_metrics_server,
 )
+from cortex_utils.queue import ensure_queue_schema
 from google.cloud import pubsub_v1
 from google.cloud.pubsub_v1.types import FlowControl
 from google.oauth2.credentials import Credentials
@@ -411,7 +412,15 @@ class GmailSync:
                         pass  # Connection may have been closed already
 
     def _ensure_postgres_schema(self, conn: psycopg2.extensions.connection) -> None:
-        """Create tables if they don't exist."""
+        """Ensure the shared queue schema and this service's own tables."""
+        # The queue's own schema, from the package that owns it. Not optional
+        # and not a manual step: the exponential-backoff feature shipped months
+        # before it first RAN in production, its migration existed as a CLI
+        # command the deploy flow never invoked, and two workers crash-looped on
+        # "column next_attempt_at does not exist" (cortex-rgmk). Idempotent,
+        # serialised across services, cheap on the steady-state path.
+        ensure_queue_schema(conn)
+
         with conn.cursor() as cur:
             cur.execute(
                 """

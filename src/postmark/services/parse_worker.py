@@ -20,6 +20,7 @@ from cortex_utils.metrics import (
     QUEUE_PROCESSED,
     start_metrics_server,
 )
+from cortex_utils.queue import ensure_queue_schema
 from cortex_utils.queue.retry import fail_or_retry, ready_predicate
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -169,8 +170,16 @@ class ParseWorker:
         self._label_cache.update(label["id"] for label in api_labels)
 
     def _ensure_schema(self) -> None:
-        """Ensure emails_parsed table exists."""
+        """Ensure the shared queue schema and this service's own tables."""
         conn = self._get_pg_conn()
+        # The queue's own schema, from the package that owns it. Not optional
+        # and not a manual step: the exponential-backoff feature shipped months
+        # before it first RAN in production, its migration existed as a CLI
+        # command the deploy flow never invoked, and two workers crash-looped on
+        # "column next_attempt_at does not exist" (cortex-rgmk). Idempotent,
+        # serialised across services, cheap on the steady-state path.
+        ensure_queue_schema(conn)
+
         with conn.cursor() as cur:
             cur.execute(
                 """
