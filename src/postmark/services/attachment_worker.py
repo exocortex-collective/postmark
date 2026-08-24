@@ -171,7 +171,7 @@ class AttachmentWorker:
                 f"""
                 WITH reset_stale AS (
                     UPDATE queue
-                    SET status = 'pending', claimed_at = NULL
+                    SET status = 'pending', claimed_at = NULL, claimed_by = NULL
                     WHERE queue_name = 'attachment'
                       AND status = 'processing'
                       AND claimed_at < NOW() - (INTERVAL '1 minute' * %s)
