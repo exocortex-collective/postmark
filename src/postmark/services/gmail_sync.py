@@ -462,6 +462,7 @@ class GmailSync:
                     last_error TEXT,
                     created_at TIMESTAMPTZ DEFAULT NOW(),
                     claimed_at TIMESTAMPTZ,
+                    claimed_by TEXT,
                     completed_at TIMESTAMPTZ,
                     next_attempt_at TIMESTAMPTZ,
                     CONSTRAINT valid_status CHECK (
@@ -471,6 +472,14 @@ class GmailSync:
 
                 -- Migration: add next_attempt_at for retry backoff
                 ALTER TABLE queue ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ;
+
+                -- Migration: add claimed_by, the claim token every stale reset
+                -- clears and every report in cortex_utils.queue.ops matches on.
+                -- The claim statements in parse_worker and attachment_worker
+                -- name it unconditionally, so without this a fresh install
+                -- claims zero jobs -- the reset is a CTE inside the claim, so
+                -- the whole statement aborts rather than degrading.
+                ALTER TABLE queue ADD COLUMN IF NOT EXISTS claimed_by TEXT;
 
                 -- Drop old index superseded by priority-aware index
                 DROP INDEX IF EXISTS idx_queue_pending;
