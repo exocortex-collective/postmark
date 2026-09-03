@@ -20,8 +20,13 @@ from cortex_utils.metrics import (
     QUEUE_PROCESSED,
     start_metrics_server,
 )
-from cortex_utils.queue import ensure_queue_schema
-from cortex_utils.queue.retry import fail_or_retry, ready_predicate
+from cortex_utils.queue import (
+    claim,
+    complete,
+    ensure_queue_schema,
+    fail_or_retry,
+    worker_identity,
+)
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from psycopg2.extras import Json, execute_values
@@ -35,7 +40,6 @@ logger = get_logger(__name__)
 # How long a job can be in 'processing' before it's considered stale
 # and reset to 'pending' (visibility timeout)
 VISIBILITY_TIMEOUT_MINUTES = 5
-MAX_ATTEMPTS = 3
 
 
 @dataclass
@@ -60,6 +64,11 @@ class ParseWorker:
         self._label_cache: set[str] = set()  # Known label IDs in gmail_labels
         self._last_label_sync: float = 0  # Timestamp of last Gmail API label sync
         self._label_sync_interval: float = 60.0  # Min seconds between API syncs
+        # The claim token, one per process. Every report this worker makes is
+        # matched against it, so it has to be stable for the process's life and
+        # unique across processes -- regenerating it per claim would make every
+        # later complete() bounce.
+        self._worker = worker_identity("parse-worker")
 
     def _get_pg_conn(self) -> psycopg2.extensions.connection:
         if self._pg_conn is None or self._pg_conn.closed:
@@ -224,43 +233,33 @@ class ParseWorker:
         logger.info("emails_parsed schema ensured")
 
     def _claim_jobs(self, batch_size: int) -> list[dict[str, Any]]:
-        """Claim a batch of pending parse jobs.
+        """Claim a batch of pending parse jobs, through the library that owns
+        the queue's SQL.
 
-        Also resets stale jobs that have been processing for too long
-        (visibility timeout), handling crashed/killed workers.
+        This was a hand-written CTE. What it did not do is set claimed_by, so
+        this worker never wrote a claim token. The column exists, is migrated
+        everywhere, and is correctly cleared in twelve places across four repos
+        -- and nothing ever set it, so all of that protection was inert. claim()
+        sets it, which is what lets complete()/release()/fail_or_retry() refuse
+        a report from a worker that no longer holds the row.
+
+        The other difference is in how a stale row on its last attempt is
+        handled. The old reset had no attempts predicate, so it returned such a
+        row to pending and the work ran again, forever, with the failure never
+        recorded. claim() retires it instead: 'failed', with a reason, visible
+        in failures(), archivable to dead_letter. Better, but note it IS a
+        behaviour change -- work that used to be retried indefinitely now stops.
         """
-        conn = self._get_pg_conn()
-        with conn.cursor() as cur:
-            # Reset stale jobs and claim new ones in a single transaction
-            cur.execute(
-                f"""
-                WITH reset_stale AS (
-                    UPDATE queue
-                    SET status = 'pending', claimed_at = NULL, claimed_by = NULL
-                    WHERE queue_name = 'parse'
-                      AND status = 'processing'
-                      AND claimed_at < NOW() - (INTERVAL '1 minute' * %s)
-                ),
-                claimable AS (
-                    SELECT id FROM queue
-                    WHERE queue_name = 'parse' AND status = 'pending'
-                      AND {ready_predicate()}
-                    ORDER BY priority DESC, created_at
-                    LIMIT %s
-                    FOR UPDATE SKIP LOCKED
-                )
-                UPDATE queue
-                SET status = 'processing', claimed_at = NOW()
-                WHERE id IN (SELECT id FROM claimable)
-                RETURNING id, payload, priority
-                """,
-                (VISIBILITY_TIMEOUT_MINUTES, batch_size),
-            )
-            jobs = [
-                {"id": row[0], "payload": row[1], "priority": row[2]}
-                for row in cur.fetchall()
-            ]
-            conn.commit()
+        # Annotated because cortex_utils ships no py.typed marker, so mypy sees
+        # everything it returns as Any (cortex-utils is fully annotated; the
+        # marker is just missing -- tracked separately).
+        jobs: list[dict[str, Any]] = claim(
+            self._get_pg_conn(),
+            "parse",
+            worker=self._worker,
+            limit=batch_size,
+            visibility_timeout_min=VISIBILITY_TIMEOUT_MINUTES,
+        )
         return jobs
 
     def _get_raw_email(self, gmail_id: str) -> dict[str, Any] | None:
@@ -334,25 +333,40 @@ class ParseWorker:
             conn.commit()
 
     def _complete_job(self, job_id: int) -> None:
-        """Mark job as completed."""
-        conn = self._get_pg_conn()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE queue
-                SET status = 'completed', completed_at = NOW()
-                WHERE id = %s
-            """,
-                (job_id,),
-            )
-            conn.commit()
+        """Mark job as completed, against the claim we still hold.
+
+        The raw UPDATE this replaces matched on id alone, so a worker that had
+        stalled past the visibility timeout could retire a row another worker
+        had since claimed. complete() also requires status='processing' and a
+        matching claimed_by, and returns False rather than raising when the
+        claim is gone -- the library logs the bounce, and there is nothing for
+        us to do about it beyond not pretending we finished the work.
+
+        Which means actually not pretending: the return value is checked, so a
+        bounced completion is not counted as a success. Discarding it let
+        process_job return True and increment QUEUE_PROCESSED{status="success"}
+        for a job the queue still shows as unfinished and another worker is
+        redoing -- a metric that lies in precisely the situation you would be
+        reading it.
+        """
+        if not complete(self._get_pg_conn(), job_id, self._worker):
+            ERRORS.labels(service="parse-worker", error_type="claim_lost").inc()
 
     def _fail_job(self, job_id: int, error: str) -> None:
-        """Schedule a retry with backoff, or mark failed if attempts exhausted."""
+        """Schedule a retry with backoff, or mark failed if attempts exhausted.
+
+        ops.fail_or_retry rather than retry.fail_or_retry: it matches the claim
+        token, so a stalled worker cannot retire a row someone else is holding.
+        It also reads max_attempts from the row instead of taking it as an
+        argument, which is why MAX_ATTEMPTS is gone -- a row enqueued with its
+        own budget now gets that budget honoured rather than overridden.
+        """
         conn = self._get_pg_conn()
+        # Clear an aborted transaction first: the caller reaches here from an
+        # exception, and the next statement would otherwise fail complaining
+        # about that one.
         conn.rollback()
-        fail_or_retry(conn, job_id, error, max_attempts=MAX_ATTEMPTS)
-        conn.commit()
+        fail_or_retry(conn, job_id, error, self._worker)
 
     def _enqueue_triage(self, gmail_id: str, priority: int = 0) -> None:
         """Enqueue email for triage (idempotent - skips if already pending/processing).

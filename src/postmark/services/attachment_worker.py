@@ -24,8 +24,13 @@ from cortex_utils.metrics import (
     QUEUE_PROCESSED,
     start_metrics_server,
 )
-from cortex_utils.queue import ensure_queue_schema
-from cortex_utils.queue.retry import fail_or_retry, ready_predicate
+from cortex_utils.queue import (
+    claim,
+    complete,
+    ensure_queue_schema,
+    fail_or_retry,
+    worker_identity,
+)
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
@@ -38,7 +43,6 @@ logger = get_logger(__name__)
 # How long a job can be in 'processing' before it's considered stale
 # and reset to 'pending' (visibility timeout)
 VISIBILITY_TIMEOUT_MINUTES = 5
-MAX_ATTEMPTS = 3
 
 # S3 multipart upload threshold (use multipart for files > 10MB)
 # AWS best practice is 10MB, reduces memory usage for large files
@@ -75,6 +79,8 @@ class AttachmentWorker:
         self._pg_conn: psycopg2.extensions.connection | None = None
         self._s3_client: Any = None  # boto3 S3 client (dynamically typed)
         self._gmail_service: Resource | None = None
+        # The claim token, one per process -- see parse_worker.
+        self._worker = worker_identity("attachment-worker")
 
     def _get_pg_conn(self) -> psycopg2.extensions.connection:
         if self._pg_conn is None or self._pg_conn.closed:
@@ -168,43 +174,25 @@ class AttachmentWorker:
         logger.info("Attachments schema ensured")
 
     def _claim_jobs(self, batch_size: int) -> list[dict[str, Any]]:
-        """Claim a batch of pending attachment jobs.
+        """Claim a batch of pending attachment jobs, through the library that
+        owns the queue's SQL.
 
-        Also resets stale jobs that have been processing for too long
-        (visibility timeout), handling crashed/killed workers.
+        See parse_worker._claim_jobs for why: the hand-written CTE set status
+        and claimed_at but never claimed_by, so no claim token was ever written
+        and everything built on it was inert. And its stale reset had no
+        attempts predicate, so a row that died on its last attempt went back to
+        pending and ran again forever with the failure never recorded; claim()
+        retires it instead.
         """
-        conn = self._get_pg_conn()
-        with conn.cursor() as cur:
-            # Reset stale jobs and claim new ones in a single transaction
-            cur.execute(
-                f"""
-                WITH reset_stale AS (
-                    UPDATE queue
-                    SET status = 'pending', claimed_at = NULL, claimed_by = NULL
-                    WHERE queue_name = 'attachment'
-                      AND status = 'processing'
-                      AND claimed_at < NOW() - (INTERVAL '1 minute' * %s)
-                ),
-                claimable AS (
-                    SELECT id FROM queue
-                    WHERE queue_name = 'attachment' AND status = 'pending'
-                      AND {ready_predicate()}
-                    ORDER BY priority DESC, created_at
-                    LIMIT %s
-                    FOR UPDATE SKIP LOCKED
-                )
-                UPDATE queue
-                SET status = 'processing', claimed_at = NOW()
-                WHERE id IN (SELECT id FROM claimable)
-                RETURNING id, payload, priority
-                """,
-                (VISIBILITY_TIMEOUT_MINUTES, batch_size),
-            )
-            jobs = [
-                {"id": row[0], "payload": row[1], "priority": row[2]}
-                for row in cur.fetchall()
-            ]
-            conn.commit()
+        # Annotated because cortex_utils ships no py.typed marker -- see
+        # parse_worker._claim_jobs.
+        jobs: list[dict[str, Any]] = claim(
+            self._get_pg_conn(),
+            "attachment",
+            worker=self._worker,
+            limit=batch_size,
+            visibility_timeout_min=VISIBILITY_TIMEOUT_MINUTES,
+        )
         return jobs
 
     def _get_attachment_metadata(
@@ -321,25 +309,29 @@ class AttachmentWorker:
             conn.commit()
 
     def _complete_job(self, job_id: int) -> None:
-        """Mark job as completed."""
-        conn = self._get_pg_conn()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE queue
-                SET status = 'completed', completed_at = NOW()
-                WHERE id = %s
-            """,
-                (job_id,),
-            )
-            conn.commit()
+        """Mark job as completed, against the claim we still hold.
+
+        See parse_worker._complete_job: the raw UPDATE matched on id alone, so
+        a worker stalled past the visibility timeout could retire a row another
+        worker had since claimed. The return is checked so a bounced completion
+        is not counted as a success.
+        """
+        if not complete(self._get_pg_conn(), job_id, self._worker):
+            ERRORS.labels(service="attachment-worker", error_type="claim_lost").inc()
 
     def _fail_job(self, job_id: int, error: str) -> None:
-        """Schedule a retry with backoff, or mark failed if attempts exhausted."""
+        """Schedule a retry with backoff, or mark failed if attempts exhausted.
+
+        ops.fail_or_retry rather than retry.fail_or_retry: it matches the claim
+        token, and reads max_attempts from the row rather than taking it as an
+        argument -- which is why MAX_ATTEMPTS is gone.
+        """
         conn = self._get_pg_conn()
+        # Clear an aborted transaction first: the caller reaches here from an
+        # exception, and the next statement would otherwise fail complaining
+        # about that one.
         conn.rollback()
-        fail_or_retry(conn, job_id, error, max_attempts=MAX_ATTEMPTS)
-        conn.commit()
+        fail_or_retry(conn, job_id, error, self._worker)
 
     def _upload_small_file(self, s3_key: str, data: bytes, mime_type: str) -> None:
         """Upload small file using simple put_object."""
@@ -636,15 +628,21 @@ class AttachmentWorker:
                             s3_key,
                         ),
                     )
-                cur.execute(
-                    """
-                    UPDATE queue
-                    SET status = 'completed', completed_at = NOW()
-                    WHERE id = %s
-                """,
-                    (job["id"],),
-                )
+                # commit=False: the attachment row and the completion land in
+                # one transaction or neither does. This service processes each
+                # message atomically by policy, and splitting them would let the
+                # attachment commit while the completion rolled back -- the job
+                # runs again and re-uploads -- or the reverse, losing the work.
+                held = complete(conn, job["id"], self._worker, commit=False)
                 conn.commit()
+            if not held:
+                # The attachment rows are committed either way -- the upsert is
+                # ON CONFLICT DO UPDATE and whoever holds the claim now redoes
+                # the work idempotently. What must not happen is this worker
+                # reporting success for a job the queue still shows unfinished.
+                ERRORS.labels(
+                    service="attachment-worker", error_type="claim_lost"
+                ).inc()
 
             # Clean up raw_response now that all attachments are processed
             try:
