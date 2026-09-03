@@ -33,7 +33,13 @@ TO_PENDING = re.compile(r"UPDATE queue\s+SET status = 'pending'.*?(?=WHERE)", re
 
 # Pinned per file, so a newly added pending-UPDATE has to declare itself here
 # rather than being quietly uncovered.
-EXPECTED = {"parse_worker.py": 1, "attachment_worker.py": 1}
+#
+# A file drops to 0 when it is ported to ops.claim(): the library then owns the
+# stale reset, and cortex-utils tests the invariant at the source instead of
+# here. That is the direction of travel, so a count going DOWN is progress and a
+# count going UP needs the guard. This test noticing the change is the point --
+# it caught the port, which is what it is for.
+EXPECTED = {"parse_worker.py": 0, "attachment_worker.py": 0}
 
 
 @pytest.mark.parametrize("name,count", sorted(EXPECTED.items()))
