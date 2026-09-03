@@ -236,19 +236,19 @@ class ParseWorker:
         """Claim a batch of pending parse jobs, through the library that owns
         the queue's SQL.
 
-        This was a hand-written CTE. Two things it did not do:
+        This was a hand-written CTE. What it did not do is set claimed_by, so
+        this worker never wrote a claim token. The column exists, is migrated
+        everywhere, and is correctly cleared in twelve places across four repos
+        -- and nothing ever set it, so all of that protection was inert. claim()
+        sets it, which is what lets complete()/release()/fail_or_retry() refuse
+        a report from a worker that no longer holds the row.
 
-        It set status and claimed_at but never claimed_by, so this worker never
-        wrote a claim token. The column exists, is migrated everywhere, and is
-        correctly cleared in twelve places across four repos -- and nothing ever
-        set it, so all of that protection was inert. claim() sets it, which is
-        what makes complete()/release()/fail_or_retry() able to refuse a report
-        from a worker that no longer holds the row.
-
-        And it had no retire_exhausted branch: a worker that died on a job's
-        LAST attempt left the row 'processing' forever -- never failed, never in
-        failures(), never archived to dead_letter, and pinning its partition
-        against retention permanently. claim() retires those.
+        The other difference is in how a stale row on its last attempt is
+        handled. The old reset had no attempts predicate, so it returned such a
+        row to pending and the work ran again, forever, with the failure never
+        recorded. claim() retires it instead: 'failed', with a reason, visible
+        in failures(), archivable to dead_letter. Better, but note it IS a
+        behaviour change -- work that used to be retried indefinitely now stops.
         """
         # Annotated because cortex_utils ships no py.typed marker, so mypy sees
         # everything it returns as Any (cortex-utils is fully annotated; the
@@ -341,8 +341,16 @@ class ParseWorker:
         matching claimed_by, and returns False rather than raising when the
         claim is gone -- the library logs the bounce, and there is nothing for
         us to do about it beyond not pretending we finished the work.
+
+        Which means actually not pretending: the return value is checked, so a
+        bounced completion is not counted as a success. Discarding it let
+        process_job return True and increment QUEUE_PROCESSED{status="success"}
+        for a job the queue still shows as unfinished and another worker is
+        redoing -- a metric that lies in precisely the situation you would be
+        reading it.
         """
-        complete(self._get_pg_conn(), job_id, self._worker)
+        if not complete(self._get_pg_conn(), job_id, self._worker):
+            ERRORS.labels(service="parse-worker", error_type="claim_lost").inc()
 
     def _fail_job(self, job_id: int, error: str) -> None:
         """Schedule a retry with backoff, or mark failed if attempts exhausted.

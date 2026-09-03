@@ -179,9 +179,10 @@ class AttachmentWorker:
 
         See parse_worker._claim_jobs for why: the hand-written CTE set status
         and claimed_at but never claimed_by, so no claim token was ever written
-        and everything built on it was inert; and it had no retire_exhausted
-        branch, so a worker that died on a job's last attempt left the row
-        'processing' forever, pinning its partition against retention.
+        and everything built on it was inert. And its stale reset had no
+        attempts predicate, so a row that died on its last attempt went back to
+        pending and ran again forever with the failure never recorded; claim()
+        retires it instead.
         """
         # Annotated because cortex_utils ships no py.typed marker -- see
         # parse_worker._claim_jobs.
@@ -312,9 +313,11 @@ class AttachmentWorker:
 
         See parse_worker._complete_job: the raw UPDATE matched on id alone, so
         a worker stalled past the visibility timeout could retire a row another
-        worker had since claimed.
+        worker had since claimed. The return is checked so a bounced completion
+        is not counted as a success.
         """
-        complete(self._get_pg_conn(), job_id, self._worker)
+        if not complete(self._get_pg_conn(), job_id, self._worker):
+            ERRORS.labels(service="attachment-worker", error_type="claim_lost").inc()
 
     def _fail_job(self, job_id: int, error: str) -> None:
         """Schedule a retry with backoff, or mark failed if attempts exhausted.
@@ -630,8 +633,16 @@ class AttachmentWorker:
                 # message atomically by policy, and splitting them would let the
                 # attachment commit while the completion rolled back -- the job
                 # runs again and re-uploads -- or the reverse, losing the work.
-                complete(conn, job["id"], self._worker, commit=False)
+                held = complete(conn, job["id"], self._worker, commit=False)
                 conn.commit()
+            if not held:
+                # The attachment rows are committed either way -- the upsert is
+                # ON CONFLICT DO UPDATE and whoever holds the claim now redoes
+                # the work idempotently. What must not happen is this worker
+                # reporting success for a job the queue still shows unfinished.
+                ERRORS.labels(
+                    service="attachment-worker", error_type="claim_lost"
+                ).inc()
 
             # Clean up raw_response now that all attachments are processed
             try:
