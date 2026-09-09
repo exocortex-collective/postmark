@@ -1932,6 +1932,14 @@ class GmailSync:
         """
 
         def _request_shutdown(signum: int, _frame: Any) -> None:
+            if self._stop_requested:
+                # Second signal: hand this one back to the default disposition so
+                # the next repeat kills the process. A graceful stop that cannot
+                # itself be interrupted is a trap -- the flag is only read inside
+                # the serve loop, so a signal during startup or during the drain
+                # is otherwise swallowed with no way to insist.
+                signal.signal(signum, signal.SIG_DFL)
+                return
             self._stop_requested = True
 
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -1970,10 +1978,19 @@ class GmailSync:
                 streaming_pull_future.result(timeout=STOP_POLL_SECONDS)
                 return
             except FutureTimeoutError:
-                # Ambiguous: either the poll expired, or the stream ended
-                # carrying a TimeoutError of its own. done() tells them apart.
-                if streaming_pull_future.done():
-                    raise
+                if not streaming_pull_future.done():
+                    continue
+                # Resolved -- and possibly only in the gap between the poll
+                # expiring and this check, since result() decides under the
+                # condition lock and done() reads after it is released. Re-raising
+                # here would report our own poll timeout as the fault that ended
+                # the stream, and would turn a clean close into a failure: the
+                # reconnect path would log an error and bump the stream-failure
+                # counter on the way out of a normal shutdown. Ask the future what
+                # actually happened instead; timeout=0 never waits, and a stream
+                # that really died of a TimeoutError still re-raises it.
+                streaming_pull_future.result(timeout=0)
+                return
         # _consume_stop_request cancelled the future; the caller's clean-close
         # path takes it from here.
 

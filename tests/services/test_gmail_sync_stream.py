@@ -342,6 +342,108 @@ def test_a_stream_that_ends_in_timeout_is_not_mistaken_for_a_poll(
     assert sync.subscriber.subscribe_calls == 2  # type: ignore[attr-defined]
 
 
+def test_a_stream_resolving_between_polls_reports_its_real_fault(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
+) -> None:
+    """The poll timeout must never be mistaken for the stream's outcome.
+
+    result() decides under the condition lock and done() reads after it is
+    released, so the pubsub shutdown thread can resolve the future in between.
+    Re-raising there reports our own TimeoutError as the fault -- and turns a
+    clean close into a failure, logging an error and bumping the stream-failure
+    counter on the way out of a normal shutdown.
+    """
+    log = _RecordingLogger()
+    monkeypatch.setattr(gmail_sync, "logger", log)
+    sync = _bare_sync()
+
+    class _ResolvesBetweenPolls(_FakeFuture):
+        """Resolves exactly in the gap between the poll expiring and done()."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._resolved = False
+
+        def done(self) -> bool:
+            return self._resolved
+
+        def result(self, timeout: float | None = None) -> None:
+            if not self._resolved:
+                self._resolved = True
+                raise FutureTimeoutError
+            raise RuntimeError("the real stream fault")
+
+    sync.subscriber = _FakeSubscriber(  # type: ignore[assignment]
+        [_ResolvesBetweenPolls(), _StoppingFuture(sync._shutdown)]
+    )
+
+    sync._serve_subscription()
+
+    _level, message, kwargs = log.calls[0]
+    assert "the real stream fault" in message, f"reported the wrong fault: {message}"
+    assert isinstance(kwargs["exc_info"], RuntimeError)
+
+
+def test_a_clean_close_resolving_between_polls_is_not_a_failure(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
+) -> None:
+    """Shutdown must not log an error on its way out.
+
+    A cancel() during shutdown resolves the future with a result. If that lands
+    in the poll gap and is re-raised as a timeout, a normal stop reports a stream
+    failure and increments the counter Cortex-ahj would alert on.
+    """
+    log = _RecordingLogger()
+    monkeypatch.setattr(gmail_sync, "logger", log)
+    sync = _bare_sync()
+
+    class _ClosesBetweenPolls(_FakeFuture):
+        def __init__(self) -> None:
+            super().__init__()
+            self._resolved = False
+
+        def done(self) -> bool:
+            return self._resolved
+
+        def result(self, timeout: float | None = None) -> None:
+            if not self._resolved:
+                self._resolved = True
+                sync._shutdown.initiate()  # cancel() during shutdown
+                raise FutureTimeoutError
+            return  # resolved with a result, not an exception
+
+    errors_before = _stream_errors()
+    sync.subscriber = _FakeSubscriber([_ClosesBetweenPolls()])  # type: ignore[assignment]
+
+    sync._serve_subscription()
+
+    assert log.calls == [], f"logged a failure during a clean shutdown: {log.calls}"
+    assert _stream_errors() == errors_before
+    assert no_sleep == []
+
+
+def test_a_second_signal_restores_the_default_disposition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A graceful stop that cannot be interrupted is a trap.
+
+    The flag is only read inside the serve loop, so a signal during startup or
+    during the drain is swallowed. The second one must hand control back to the
+    default disposition so a third kills the process.
+    """
+    sync = _bare_sync()
+    installed = _install_and_capture(sync, monkeypatch)
+    handler = installed[gmail_sync.signal.SIGTERM]
+
+    handler(gmail_sync.signal.SIGTERM, None)
+    assert sync._stop_requested is True
+    assert installed[gmail_sync.signal.SIGTERM] is handler, "reset too early"
+
+    handler(gmail_sync.signal.SIGTERM, None)
+
+    assert installed[gmail_sync.signal.SIGTERM] is gmail_sync.signal.SIG_DFL
+
+
 def test_interruptible_sleep_returns_early_on_a_stop_request() -> None:
     """The backoff wait must notice a stop rather than run to term.
 
