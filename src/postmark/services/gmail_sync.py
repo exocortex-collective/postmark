@@ -7,7 +7,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -47,6 +47,7 @@ from postmark.reliability import (
     CircuitBreakerConfig,
     CircuitOpenError,
     GracefulShutdown,
+    calculate_backoff_delay,
     call_with_circuit_breaker,
     retry_with_backoff,
 )
@@ -57,6 +58,22 @@ PUBSUB_MESSAGES = Counter(
     "Total Pub/Sub messages processed",
     ["status"],  # success, error
 )
+
+PUBSUB_STREAM_RECONNECTS = Counter(
+    "gmail_sync_pubsub_stream_reconnects_total",
+    "Times the Pub/Sub streaming pull was reopened after an error",
+)
+
+# How long a streaming pull must survive before its next failure counts as a new
+# fault rather than a continuing one. Comfortably longer than the 62.8s median
+# lifetime observed during the ACCESS_TOKEN_EXPIRED crash loop, so that pattern
+# backs off instead of reconnecting hot.
+STREAM_HEALTHY_SECONDS = 300.0
+
+# Ceiling on the reconnect attempt counter. The delay curve saturates at
+# max_delay within ~8 attempts, so this changes no timing; it exists because the
+# reconnect loop is unbounded and multiplier ** attempt overflows around 1024.
+STREAM_BACKOFF_ATTEMPT_CAP = 16
 
 # Queue priority for backfill jobs (lower = deprioritized vs real-time mail)
 BACKFILL_PRIORITY = -100
@@ -89,6 +106,25 @@ def is_retryable_http_error(error: HttpError) -> bool:
 
     # For any other status, be conservative and retry.
     return True
+
+
+# Exceptions worth retrying a notification for, rather than nacking immediately.
+#
+# OSError is the important entry and it is deliberately broad. This tuple used to
+# name urllib.error.URLError and TimeoutError, which look like they cover network
+# faults but do not: ssl.SSLError and BrokenPipeError descend from OSError without
+# passing through either, so a TLS connection dropped mid-request matched nothing
+# here and skipped the backoff entirely. On 2026-09-09 that produced three
+# failures inside two seconds, each logged as though it had exhausted its retries.
+# Every exception previously listed is itself an OSError subclass, so naming the
+# base class is a strict widening rather than a change of intent.
+RETRYABLE_NOTIFICATION_EXCEPTIONS: tuple[type[Exception], ...] = (
+    HttpError,  # Will be filtered by process_with_error_classification
+    psycopg2.Error,
+    OSError,  # URLError, TimeoutError, ssl.SSLError, BrokenPipeError, socket.timeout
+    RuntimeError,
+    CircuitOpenError,
+)
 
 
 logger = get_logger(__name__)
@@ -290,6 +326,23 @@ class GmailSync:
             jitter=0.1,
             max_retries=3,
         )
+
+        # Reliability: Backoff for reopening the Pub/Sub stream. Slower and
+        # longer-lived than the per-notification config above: a broken stream
+        # usually means the network or the credential is unavailable, and
+        # hammering the subscription helps neither. max_retries is unused here --
+        # _serve_subscription reconnects for as long as the service is running --
+        # but the delay curve is the same shape.
+        self._stream_backoff_config = BackoffConfig(
+            initial_delay=2.0,
+            max_delay=300.0,
+            multiplier=2.0,
+            jitter=0.2,
+            max_retries=0,
+        )
+
+        # The subscription currently being served, so shutdown can cancel it.
+        self._streaming_pull_future: Any = None
 
         # Reliability: Graceful shutdown handler
         self._shutdown = GracefulShutdown()
@@ -1243,26 +1296,16 @@ class GmailSync:
                     message.ack()
                     return
 
-        # Only retry truly transient errors
-        retryable_exceptions = (
-            HttpError,  # Will be filtered by process_with_error_classification
-            psycopg2.Error,
-            urllib.error.URLError,
-            TimeoutError,
-            RuntimeError,
-            CircuitOpenError,
-        )
-
         try:
             retry_with_backoff(
                 process_with_error_classification,
                 config=self._backoff_config,
-                retryable_exceptions=retryable_exceptions,
+                retryable_exceptions=RETRYABLE_NOTIFICATION_EXCEPTIONS,
             )
             PUBSUB_MESSAGES.labels(status="success").inc()
         except Exception as e:
-            # All retries exhausted
-            logger.exception(f"Error processing notification after retries: {e}")
+            # Either the error was not retryable, or retries were exhausted.
+            logger.exception(f"Giving up on notification, nacking for redelivery: {e}")
             PUBSUB_MESSAGES.labels(status="error").inc()
             ERRORS.labels(service="gmail-sync", error_type="notification_failed").inc()
             message.nack()
@@ -1868,22 +1911,14 @@ class GmailSync:
         scheduler_thread = threading.Thread(target=self.run_scheduler, daemon=True)
         scheduler_thread.start()
 
-        # Start Pub/Sub subscriber with flow control to prevent connection pool exhaustion
-        # Limit concurrent messages to match pool size
-        flow_control = FlowControl(max_messages=self.config.postgres.pool_max_conn)
-        streaming_pull_future = self.subscriber.subscribe(
-            self.config.subscription_path,
-            callback=self.process_notification,
-            flow_control=flow_control,
-        )
-        logger.info(f"Listening on {self.config.subscription_path}")
-
         try:
-            streaming_pull_future.result()
+            self._serve_subscription()
         except KeyboardInterrupt:
             logger.info("Shutdown signal received, initiating graceful shutdown...")
             self._shutdown.initiate()
-            streaming_pull_future.cancel()
+            streaming_pull_future = self._streaming_pull_future
+            if streaming_pull_future is not None:
+                streaming_pull_future.cancel()
 
             # Wait for in-flight notifications to complete
             if self._shutdown.wait_for_completion(timeout=30.0):
@@ -1893,8 +1928,118 @@ class GmailSync:
                     "Graceful shutdown timeout - some work may be incomplete"
                 )
 
-            streaming_pull_future.result()
+            if streaming_pull_future is not None:
+                # After cancel() this raises CancelledError; we are already on the
+                # way out and the shutdown is no less complete for it.
+                with suppress(Exception):
+                    streaming_pull_future.result()
             logger.info("Shutdown complete")
+
+    def _serve_subscription(self) -> None:
+        """Hold the Pub/Sub subscription open, reopening it when the stream breaks.
+
+        The streaming pull is a long-lived gRPC stream and `.result()` re-raises
+        whatever ended it. The only handler used to be for KeyboardInterrupt, so
+        any other error killed the process and left `restart: unless-stopped` to
+        do the reconnecting: between 2026-09-07 and 2026-09-08 an
+        ACCESS_TOKEN_EXPIRED ended the stream 1119 times, and the median process
+        lived 62.8 seconds. That is a working system only by accident. Restarting
+        also drops the scheduler mid-cycle, re-renews the Gmail watch on every
+        boot, and reports a healthy container throughout, which is why two days
+        of it went unnoticed.
+
+        Reopening the stream here keeps the scheduler and the connection pool
+        alive across a fault that is, in the end, a reconnect.
+        """
+        # Flow control limits concurrent messages to the connection pool size, so
+        # a burst of notifications cannot exhaust it.
+        flow_control = FlowControl(max_messages=self.config.postgres.pool_max_conn)
+        consecutive_failures = 0
+
+        while self._shutdown.should_continue():
+            streaming_pull_future = self.subscriber.subscribe(
+                self.config.subscription_path,
+                callback=self.process_notification,
+                flow_control=flow_control,
+            )
+            self._streaming_pull_future = streaming_pull_future
+            logger.info(f"Listening on {self.config.subscription_path}")
+            started = time.monotonic()
+
+            try:
+                streaming_pull_future.result()
+            except Exception as e:
+                streaming_pull_future.cancel()
+                uptime = time.monotonic() - started
+
+                # A stream that ran a good while and then broke is a fresh fault,
+                # not an escalating one: hold the backoff for repeated quick
+                # failures only, or a nightly blip inherits the previous night's
+                # delay.
+                if uptime >= STREAM_HEALTHY_SECONDS:
+                    consecutive_failures = 0
+                delay = calculate_backoff_delay(
+                    consecutive_failures, self._stream_backoff_config
+                )
+                # Cap the attempt counter, not just the delay. This loop has no
+                # retry limit, and calculate_backoff_delay computes
+                # multiplier ** attempt before clamping to max_delay -- at
+                # attempt 1024 that overflows and raises, which would kill the
+                # process from inside the handler that exists to keep it alive.
+                # The last incident reached 1119 consecutive failures.
+                consecutive_failures = min(
+                    consecutive_failures + 1, STREAM_BACKOFF_ATTEMPT_CAP
+                )
+
+                logger.error(
+                    f"Pub/Sub stream ended after {uptime:.1f}s, "
+                    f"reconnecting in {delay:.1f}s: {e}",
+                    exc_info=True,
+                    extra=self._stream_failure_diagnostics(),
+                )
+                ERRORS.labels(
+                    service="gmail-sync", error_type="pubsub_stream_failed"
+                ).inc()
+                PUBSUB_STREAM_RECONNECTS.inc()
+
+                if not self._shutdown.should_continue():
+                    break
+                time.sleep(delay)
+            else:
+                # result() returning is the future being cancelled, which only
+                # happens on the way to shutdown.
+                return
+
+    def _stream_failure_diagnostics(self) -> dict[str, str]:
+        """Facts worth having in the log when the stream dies.
+
+        ACCESS_TOKEN_EXPIRED arrived on tokens under a minute old, which cannot
+        have aged out and points instead at the clock that minted them
+        disagreeing with Google's -- the container runs in a VM whose clock
+        drifts across suspend. Local time beside the token's own expiry settles
+        that question at the next occurrence instead of leaving it to be
+        reconstructed from logs afterwards.
+
+        Best-effort by construction: this runs on an error path and must not
+        raise, and it reads a private attribute that may move between library
+        versions.
+        """
+        now = datetime.now(timezone.utc)
+        facts = {"local_utc": now.isoformat()}
+        try:
+            credentials = self.subscriber.transport._credentials  # type: ignore[union-attr]
+            expiry = getattr(credentials, "expiry", None)
+            if expiry is not None:
+                # google-auth stores expiry as a naive UTC datetime.
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                facts["token_expiry_utc"] = expiry.isoformat()
+                facts["token_seconds_remaining"] = (
+                    f"{(expiry - now).total_seconds():.1f}"
+                )
+        except Exception:  # noqa: BLE001 - diagnostics must never mask the fault
+            facts["token_expiry_utc"] = "unavailable"
+        return facts
 
 
 def main() -> None:
