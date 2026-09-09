@@ -8,6 +8,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -1951,6 +1952,31 @@ class GmailSync:
                     streaming_pull_future.cancel()
         return not self._shutdown.should_continue()
 
+    def _await_stream(self, streaming_pull_future: Any) -> None:
+        """Block on the stream, waking often enough to notice a stop request.
+
+        The service spends essentially all of its life here, so this is the one
+        wait that has to be interruptible. `result()` with no timeout ends in a
+        lock acquire, and PEP 475 resumes that after the signal handler returns
+        -- the same trap as time.sleep, on the call that matters most. Measured:
+        a 2s wait signalled at 0.3s returns at 2.0s. Left unbounded, a stop
+        arriving while the stream is healthy is simply never read, and since
+        installing a SIGINT handler replaces default_int_handler, Ctrl-C no
+        longer raises KeyboardInterrupt either -- so the process would ignore
+        both until the stream broke on its own.
+        """
+        while not self._consume_stop_request():
+            try:
+                streaming_pull_future.result(timeout=STOP_POLL_SECONDS)
+                return
+            except FutureTimeoutError:
+                # Ambiguous: either the poll expired, or the stream ended
+                # carrying a TimeoutError of its own. done() tells them apart.
+                if streaming_pull_future.done():
+                    raise
+        # _consume_stop_request cancelled the future; the caller's clean-close
+        # path takes it from here.
+
     def _interruptible_sleep(self, seconds: float) -> None:
         """Wait, but notice a stop request while waiting.
 
@@ -2000,9 +2026,15 @@ class GmailSync:
             # the signal handler above.
             logger.info("Shutdown signal received, initiating graceful shutdown...")
             self._stop_requested = True
-
-        self._consume_stop_request()
-        self._drain_and_close()
+        finally:
+            # Unconditional. _serve_subscription's post-failure block runs
+            # outside its own try -- the backoff maths, the structlog call, the
+            # counters, _consume_stop_request and the wait -- and that is all
+            # error-path code, which runs precisely when something has already
+            # gone wrong. An unexpected escape there is exactly when abandoning
+            # in-flight notifications costs the most.
+            self._consume_stop_request()
+            self._drain_and_close()
 
     def _drain_and_close(self) -> None:
         """Let in-flight notifications finish, then close the stream.
@@ -2010,30 +2042,34 @@ class GmailSync:
         Reached however shutdown was requested -- a signal, or an interrupt --
         so the drain does not depend on which path got here.
         """
+        deadline = time.monotonic() + SHUTDOWN_TIMEOUT_SECONDS
         streaming_pull_future = self._streaming_pull_future
+
         if streaming_pull_future is not None:
             with suppress(Exception):
                 streaming_pull_future.cancel()
 
-        if self._shutdown.wait_for_completion(timeout=SHUTDOWN_TIMEOUT_SECONDS):
+            # This is the drain, not just the close. cancel() is non-blocking and
+            # hands off to a daemon thread that resolves the future only once the
+            # callback executor has finished -- and we subscribe asking it to wait
+            # for callbacks. Doing it before wait_for_completion matters: messages
+            # already handed to that executor enter track_work() after cancel()
+            # returns, so a wait_for_completion() run first can sample
+            # _in_flight == 0 and report "all work finished" while notifications
+            # are still starting.
+            #
+            # Bounded, because unbounded it would block past any stop grace period
+            # on exactly the work the timeout above exists to give up on.
+            with suppress(Exception):
+                streaming_pull_future.result(timeout=SHUTDOWN_TIMEOUT_SECONDS)
+
+        # Whatever is left of the budget, so the two waits cannot stack into
+        # double the grace period we claim to honour.
+        remaining = max(deadline - time.monotonic(), 0.0)
+        if self._shutdown.wait_for_completion(timeout=remaining):
             logger.info("Graceful shutdown complete - all work finished")
         else:
             logger.warning("Graceful shutdown timeout - some work may be incomplete")
-
-        if streaming_pull_future is not None:
-            # cancel() resolves the future with a result rather than cancelling
-            # it in the concurrent.futures sense, so this normally returns.
-            # suppress() is for the other ordering, where the stream had already
-            # failed and result() re-raises that error; we are on the way out
-            # either way.
-            #
-            # Bounded, because cancel() is non-blocking and hands off to a daemon
-            # thread that resolves this future only after the callback executor
-            # has drained -- and we ask it to wait for callbacks. Unbounded, this
-            # would log "some work may be incomplete" above and then block
-            # indefinitely on exactly that work, past any stop grace period.
-            with suppress(Exception):
-                streaming_pull_future.result(timeout=SHUTDOWN_TIMEOUT_SECONDS)
         logger.info("Shutdown complete")
 
     def _serve_subscription(self) -> None:
@@ -2093,7 +2129,7 @@ class GmailSync:
                 # up, and a slow subscribe() must not read as a healthy stream.
                 started = time.monotonic()
                 logger.info(f"Listening on {self.config.subscription_path}")
-                streaming_pull_future.result()
+                self._await_stream(streaming_pull_future)
             except Exception as e:
                 failure = e
 
@@ -2144,11 +2180,18 @@ class GmailSync:
                 if consecutive_failures >= STREAM_FAILURES_BEFORE_ERROR
                 else logger.warning
             )
-            reason = failure if failure is not None else "closed without an error"
+            # repr, not str: an exception raised bare stringifies to "" and the
+            # line would name neither the fault nor its type.
+            reason = repr(failure) if failure is not None else "closed without an error"
             emit(
                 f"Pub/Sub stream ended after {uptime:.1f}s, "
                 f"reconnecting in {delay:.1f}s: {reason}",
-                exc_info=failure is not None,
+                # The exception instance, not True. This runs outside the except
+                # block, where sys.exc_info() has already been cleared, so
+                # exc_info=True captures nothing and structlog drops it silently
+                # -- no traceback, no warning. None is the right no-op for the
+                # clean-close branch.
+                exc_info=failure,
                 # Flat kwargs, not extra=: structlog folds kwargs into the event
                 # dict, but extra= becomes a key literally named "extra", nesting
                 # these below every other field the service emits.

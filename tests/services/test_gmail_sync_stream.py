@@ -9,6 +9,7 @@ import itertools
 import ssl
 import threading
 import time
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest import mock
@@ -24,20 +25,34 @@ from postmark.services.gmail_sync import (
 )
 
 
+class _FuturesExhausted(BaseException):
+    """The fake ran out of futures.
+
+    A BaseException on purpose: `_serve_subscription` catches Exception and
+    reconnects, so an ordinary error here would loop forever and hang the suite
+    instead of failing it.
+    """
+
+
 class _FakeFuture:
     """Stands in for a StreamingPullFuture.
 
     `result()` raises whatever ended the stream, which is the behaviour that
     matters here: the real future re-raises the gRPC error on the calling thread.
+    It takes a timeout because the real one does -- the serve loop polls rather
+    than blocking, so a fake without it would not be exercising the same call.
     """
 
     def __init__(self, error: BaseException | None = None) -> None:
         self._error = error
         self.cancelled = False
 
-    def result(self) -> None:
+    def result(self, timeout: float | None = None) -> None:
         if self._error is not None:
             raise self._error
+
+    def done(self) -> bool:
+        return True
 
     def cancel(self) -> None:
         self.cancelled = True
@@ -56,7 +71,7 @@ class _StoppingFuture(_FakeFuture):
         super().__init__()
         self._shutdown = shutdown
 
-    def result(self) -> None:
+    def result(self, timeout: float | None = None) -> None:
         self._shutdown.initiate()
 
 
@@ -112,6 +127,8 @@ class _FakeSubscriber:
 
     def subscribe(self, path: str, **kwargs: Any) -> _FakeFuture:
         self.calls.append({"path": path, **kwargs})
+        if not self._futures:
+            raise _FuturesExhausted(f"subscribe() called {len(self.calls)} times")
         return self._futures.pop(0)
 
 
@@ -235,7 +252,7 @@ def test_stop_signalled_during_subscribe_does_not_serve_the_new_stream(
     served: list[str] = []
 
     class _NeverReturningFuture(_FakeFuture):
-        def result(self) -> None:
+        def result(self, timeout: float | None = None) -> None:
             served.append("result")
 
     class _SignallingSubscriber(_FakeSubscriber):
@@ -252,6 +269,77 @@ def test_stop_signalled_during_subscribe_does_not_serve_the_new_stream(
     assert served == [], "committed to result() on a stream that was already stopping"
     assert future.cancelled, "the stream opened during the stop was left running"
     assert sync.subscriber.subscribe_calls == 1  # type: ignore[attr-defined]
+
+
+def test_stop_is_noticed_while_the_stream_is_healthy(no_sleep: list[float]) -> None:
+    """The wait the service spends its life in must notice a stop.
+
+    This is the steady state: a healthy stream never resolves its future, and
+    result() with no timeout parks on a lock that PEP 475 resumes after the
+    signal handler returns. Measured: a 2s wait signalled at 0.3s returns at
+    2.0s. Since installing a SIGINT handler also replaces default_int_handler,
+    Ctrl-C stops raising KeyboardInterrupt -- so an unbounded wait here ignores
+    both SIGTERM and Ctrl-C until the stream breaks on its own, and `docker stop`
+    SIGKILLs mid-notification.
+
+    Every other fake in this file resolves immediately, so nothing else in the
+    suite can see this.
+    """
+    sync = _bare_sync()
+
+    class _HealthyStream(_FakeFuture):
+        """Never resolves on its own; only cancel() ends it."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.polls = 0
+
+        def done(self) -> bool:
+            return self.cancelled
+
+        def result(self, timeout: float | None = None) -> None:
+            if self.cancelled:
+                return
+            self.polls += 1
+            if self.polls == 3:  # the signal lands mid-stream
+                sync._stop_requested = True
+            raise FutureTimeoutError
+
+    future = _HealthyStream()
+    sync.subscriber = _FakeSubscriber([future])  # type: ignore[assignment]
+
+    sync._serve_subscription()
+
+    assert future.cancelled, "a stop during a healthy stream was never acted on"
+    assert sync.subscriber.subscribe_calls == 1  # type: ignore[attr-defined]
+    assert no_sleep == [], "treated a requested stop as a failure to back off from"
+
+
+def test_a_stream_that_ends_in_timeout_is_not_mistaken_for_a_poll(
+    no_sleep: list[float],
+) -> None:
+    """A real TimeoutError ending the stream must still reconnect.
+
+    The poll and the fault raise the same type, so done() is what tells them
+    apart. Without that check a stream that died of a timeout would be polled
+    forever instead of reopened.
+    """
+    sync = _bare_sync()
+
+    class _TimedOutStream(_FakeFuture):
+        def done(self) -> bool:
+            return True
+
+        def result(self, timeout: float | None = None) -> None:
+            raise FutureTimeoutError("the stream itself timed out")
+
+    sync.subscriber = _FakeSubscriber(  # type: ignore[assignment]
+        [_TimedOutStream(), _StoppingFuture(sync._shutdown)]
+    )
+
+    sync._serve_subscription()
+
+    assert sync.subscriber.subscribe_calls == 2  # type: ignore[attr-defined]
 
 
 def test_interruptible_sleep_returns_early_on_a_stop_request() -> None:
@@ -542,9 +630,36 @@ def test_repeated_failures_escalate_from_warning_to_error(
 
     assert log.levels == ["warning"] * (threshold - 1) + ["error"]
     for _, _, kwargs in log.calls:
-        assert kwargs["exc_info"] is True
+        # The exception instance, not True: emit() runs outside the except
+        # block, where exc_info=True resolves against a cleared sys.exc_info()
+        # and structlog drops the traceback without saying so.
+        assert isinstance(kwargs["exc_info"], RuntimeError)
         assert "token_expiry_utc" in kwargs
         assert "extra" not in kwargs
+
+
+def test_a_bare_exception_is_still_identifiable_in_the_log(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
+) -> None:
+    """An exception raised with no message must not log as nothing.
+
+    str() of a bare exception is the empty string, so interpolating the instance
+    leaves "...reconnecting in 2.0s: " -- no type, no message. Paired with a
+    traceback that also went missing, the fault would be unidentifiable.
+    """
+
+    class StreamGone(Exception):
+        pass
+
+    log = _RecordingLogger()
+    monkeypatch.setattr(gmail_sync, "logger", log)
+    assert str(StreamGone()) == "", "this test is only meaningful for a bare exception"
+    sync = _make_sync_stopping([StreamGone()])
+
+    sync._serve_subscription()
+
+    _level, message, _kwargs = log.calls[0]
+    assert "StreamGone" in message
 
 
 def test_clean_close_is_logged_without_an_exception(
@@ -562,7 +677,7 @@ def test_clean_close_is_logged_without_an_exception(
 
     _level, message, kwargs = log.calls[0]
     assert "closed without an error" in message
-    assert kwargs["exc_info"] is False
+    assert kwargs["exc_info"] is None
 
 
 def test_attempt_cap_keeps_the_delay_maths_finite() -> None:
@@ -648,11 +763,14 @@ def test_drain_and_close_waits_for_in_flight_work_before_closing() -> None:
     # The close is bounded too: cancel() hands off to a daemon thread that only
     # resolves the future once callbacks have drained, so an unbounded result()
     # would block past any stop grace period.
-    assert order == [
-        "cancel",
-        f"wait:{gmail_sync.SHUTDOWN_TIMEOUT_SECONDS}",
-        f"result:{gmail_sync.SHUTDOWN_TIMEOUT_SECONDS}",
-    ]
+    # The close is the drain gate and runs first: messages already handed to the
+    # callback executor enter track_work() after cancel() returns, so a
+    # wait_for_completion() run first can sample zero and report "all work
+    # finished" while notifications are still starting.
+    assert [step.split(":")[0] for step in order] == ["cancel", "result", "wait"]
+    assert order[1] == f"result:{gmail_sync.SHUTDOWN_TIMEOUT_SECONDS}"
+    # And the two waits share one budget rather than stacking to double it.
+    assert float(order[2].split(":")[1]) <= gmail_sync.SHUTDOWN_TIMEOUT_SECONDS
 
 
 def test_drain_and_close_survives_a_future_that_reraises() -> None:
