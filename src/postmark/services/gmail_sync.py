@@ -81,6 +81,13 @@ STREAM_BACKOFF_ATTEMPT_CAP = 16
 # unaided, and an ERROR record per blip is how real signal gets buried.
 STREAM_FAILURES_BEFORE_ERROR = 5
 
+# How often the backoff wait looks up to see whether a stop was requested.
+STOP_POLL_SECONDS = 0.5
+
+# Budget for draining in-flight work at shutdown, and for the stream close that
+# follows it. Docker's default stop grace is 10s, so this is already generous.
+SHUTDOWN_TIMEOUT_SECONDS = 30.0
+
 # Backoff for reopening the Pub/Sub stream. Slower and longer-lived than the
 # per-notification config: a broken stream usually means the network or the
 # credential is unavailable, and hammering the subscription helps neither.
@@ -351,6 +358,10 @@ class GmailSync:
 
         # The subscription currently being served, so shutdown can cancel it.
         self._streaming_pull_future: Any = None
+
+        # Set by the signal handler and by nothing else; see
+        # _install_signal_handlers for why it is a bare bool.
+        self._stop_requested = False
 
         # Reliability: Graceful shutdown handler
         self._shutdown = GracefulShutdown()
@@ -1907,20 +1918,56 @@ class GmailSync:
         should_continue() guards permanently true in production. `docker stop`
         sends SIGTERM, which had no handler at all: the process was killed
         outright, in-flight notifications and all. That mattered less when any
-        fault ended the process anyway; now that it stays up across faults and
-        can be asleep for up to STREAM_HEALTHY_SECONDS, it needs a real stop.
+        fault ended the process anyway; now that it stays up across faults it
+        needs a real stop.
+
+        The handler does one lock-free store and nothing else. Signal handlers
+        run on the main thread, so anything here that takes a lock the main
+        thread might already hold deadlocks the process against itself --
+        GracefulShutdown.initiate() takes one, and wait_for_completion() holds
+        it, which is exactly where a second SIGTERM lands. threading.Event.set()
+        has the same hazard. _consume_stop_request turns the flag into the real
+        shutdown from ordinary code, where taking a lock is safe.
         """
 
         def _request_shutdown(signum: int, _frame: Any) -> None:
-            logger.info(f"Signal {signum} received, initiating graceful shutdown")
+            self._stop_requested = True
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, _request_shutdown)
+
+    def _consume_stop_request(self) -> bool:
+        """Turn a signalled stop into a real one. Returns True if stopping.
+
+        Called from ordinary code rather than from the handler, so it may take
+        locks and log.
+        """
+        if self._stop_requested and self._shutdown.should_continue():
+            logger.info("Stop requested, initiating graceful shutdown")
             self._shutdown.initiate()
             streaming_pull_future = self._streaming_pull_future
             if streaming_pull_future is not None:
                 with suppress(Exception):
                     streaming_pull_future.cancel()
+        return not self._shutdown.should_continue()
 
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            signal.signal(sig, _request_shutdown)
+    def _interruptible_sleep(self, seconds: float) -> None:
+        """Wait, but notice a stop request while waiting.
+
+        time.sleep() is the wrong primitive here: since PEP 475 a sleep
+        interrupted by a signal is resumed with the remaining time once the
+        handler returns normally, so a SIGTERM one second into a saturated
+        backoff still waits out the rest. Measured: a 2s sleep signalled at
+        0.3s returns at 2.0s. Backoff reaches 300s and `docker stop` gives 10
+        before SIGKILL, so that is the difference between a graceful stop and
+        never having one.
+        """
+        deadline = time.monotonic() + seconds
+        while not self._stop_requested:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(STOP_POLL_SECONDS, remaining))
 
     def run(self) -> None:
         """Main entry point - start the service."""
@@ -1949,10 +1996,12 @@ class GmailSync:
             self._serve_subscription()
         except KeyboardInterrupt:
             # Still reachable if an interrupt lands before the handlers are
-            # installed, or between the loop's own statements.
+            # installed, or is raised from somewhere that does not route through
+            # the signal handler above.
             logger.info("Shutdown signal received, initiating graceful shutdown...")
-            self._shutdown.initiate()
+            self._stop_requested = True
 
+        self._consume_stop_request()
         self._drain_and_close()
 
     def _drain_and_close(self) -> None:
@@ -1966,7 +2015,7 @@ class GmailSync:
             with suppress(Exception):
                 streaming_pull_future.cancel()
 
-        if self._shutdown.wait_for_completion(timeout=30.0):
+        if self._shutdown.wait_for_completion(timeout=SHUTDOWN_TIMEOUT_SECONDS):
             logger.info("Graceful shutdown complete - all work finished")
         else:
             logger.warning("Graceful shutdown timeout - some work may be incomplete")
@@ -1977,8 +2026,14 @@ class GmailSync:
             # suppress() is for the other ordering, where the stream had already
             # failed and result() re-raises that error; we are on the way out
             # either way.
+            #
+            # Bounded, because cancel() is non-blocking and hands off to a daemon
+            # thread that resolves this future only after the callback executor
+            # has drained -- and we ask it to wait for callbacks. Unbounded, this
+            # would log "some work may be incomplete" above and then block
+            # indefinitely on exactly that work, past any stop grace period.
             with suppress(Exception):
-                streaming_pull_future.result()
+                streaming_pull_future.result(timeout=SHUTDOWN_TIMEOUT_SECONDS)
         logger.info("Shutdown complete")
 
     def _serve_subscription(self) -> None:
@@ -1999,12 +2054,11 @@ class GmailSync:
         flow_control = FlowControl(max_messages=self.config.postgres.pool_max_conn)
         consecutive_failures = 0
 
-        while self._shutdown.should_continue():
-            # subscribe() belongs inside the try: opening the stream is exactly
-            # as able to fail as serving it -- a bad credential or a dead network
-            # raises here rather than from result(). Outside, that exception
-            # escapes and kills the process, which is the failure this method was
-            # written to end.
+        while not self._consume_stop_request():
+            # subscribe() belongs inside the try: opening the stream constructs
+            # the streaming-pull manager and starts the bidi RPC, which can fail
+            # on its own. Outside, that exception escapes and kills the process,
+            # which is the failure this method was written to end.
             streaming_pull_future = None
             started = time.monotonic()
             failure: Exception | None = None
@@ -2027,6 +2081,14 @@ class GmailSync:
                     await_callbacks_on_shutdown=True,
                 )
                 self._streaming_pull_future = streaming_pull_future
+                # A signal handler runs on this thread at a bytecode boundary, so
+                # a stop requested during subscribe() above cancelled whatever
+                # the previous iteration left in _streaming_pull_future -- never
+                # this stream, which did not exist yet. Without re-checking here
+                # we would block in result() on a healthy stream nobody will
+                # cancel, ignoring SIGTERM until the stream broke on its own.
+                if self._consume_stop_request():
+                    return
                 # Restart the clock: uptime measures how long the stream stayed
                 # up, and a slow subscribe() must not read as a healthy stream.
                 started = time.monotonic()
@@ -2094,12 +2156,13 @@ class GmailSync:
             )
             ERRORS.labels(service="gmail-sync", error_type="pubsub_stream_failed").inc()
 
-            if not self._shutdown.should_continue():
+            if self._consume_stop_request():
                 return
-            # Counted here rather than beside ERRORS above so the name stays
-            # honest: the failure that ends the loop is not a reconnect.
+            # Counted after the shutdown check rather than beside ERRORS above,
+            # so a failure that ends the loop is not counted as a reconnect. A
+            # stop landing during the wait below still over-counts by one.
             PUBSUB_STREAM_RECONNECTS.inc()
-            time.sleep(delay)
+            self._interruptible_sleep(delay)
 
     def _stream_failure_diagnostics(self) -> dict[str, str]:
         """Facts worth having in the log when the stream dies.

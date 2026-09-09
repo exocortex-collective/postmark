@@ -7,6 +7,8 @@ crash loop, and the transient network errors that bypassed the notification retr
 
 import itertools
 import ssl
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest import mock
@@ -65,6 +67,40 @@ class _SilentLogger:
         return lambda *args, **kwargs: None
 
 
+class _RecordingLogger(_SilentLogger):
+    """Keeps the level and payload of each call, so both can be asserted."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def warning(self, msg: str, **kwargs: Any) -> None:
+        self.calls.append(("warning", msg, kwargs))
+
+    def error(self, msg: str, **kwargs: Any) -> None:
+        self.calls.append(("error", msg, kwargs))
+
+    @property
+    def levels(self) -> list[str]:
+        return [level for level, _, _ in self.calls]
+
+
+class _UncancellableFuture(_FakeFuture):
+    """cancel() raising is the case the suppress() around it exists for."""
+
+    def cancel(self) -> None:
+        raise RuntimeError("transport already gone")
+
+
+def _reconnects() -> float:
+    return gmail_sync.PUBSUB_STREAM_RECONNECTS._value.get()
+
+
+def _stream_errors() -> float:
+    return gmail_sync.ERRORS.labels(
+        service="gmail-sync", error_type="pubsub_stream_failed"
+    )._value.get()
+
+
 class _FakeSubscriber:
     def __init__(self, futures: list[_FakeFuture]) -> None:
         self._futures = list(futures)
@@ -115,6 +151,7 @@ def _bare_sync() -> GmailSync:
     # change to the real backoff must be able to fail these timing assertions.
     sync._stream_backoff_config = STREAM_BACKOFF_CONFIG
     sync._streaming_pull_future = None
+    sync._stop_requested = False
     return sync
 
 
@@ -135,13 +172,19 @@ def _make_sync_stopping(errors: list[BaseException]) -> GmailSync:
 
 @pytest.fixture
 def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
-    """Collect backoff delays instead of waiting them out."""
+    """Collect backoff delays instead of waiting them out.
+
+    Patches the method rather than time.sleep: _interruptible_sleep polls in
+    slices, so a no-op time.sleep would spin against the real clock for the
+    whole delay instead of returning.
+    """
     delays: list[float] = []
 
-    def _record(seconds: float) -> None:
-        delays.append(seconds)
-
-    monkeypatch.setattr(gmail_sync.time, "sleep", _record)
+    monkeypatch.setattr(
+        GmailSync,
+        "_interruptible_sleep",
+        lambda _self, seconds: delays.append(seconds),
+    )
     return delays
 
 
@@ -159,22 +202,88 @@ def test_stream_error_reopens_the_subscription(no_sleep: list[float]) -> None:
     assert sync.subscriber.subscribe_calls == 3  # type: ignore[attr-defined]
 
 
-def test_failing_subscribe_reconnects_rather_than_escaping() -> None:
+def test_failing_subscribe_reconnects_rather_than_escaping(
+    no_sleep: list[float],
+) -> None:
     """subscribe() failing must not kill the process either.
 
-    Opening the stream acquires credentials and builds a channel, so it raises on
-    the same fault class as serving it. While the call sat outside the try, that
-    exception escaped run() -- the pre-fix behaviour, on the second-most-likely
-    failure point in the loop.
+    Opening the stream constructs the streaming-pull manager and starts the bidi
+    RPC, which can fail on its own. While the call sat outside the try, that
+    exception escaped run() -- the pre-fix behaviour, one line above the fix.
     """
     sync = _bare_sync()
     final = _StoppingFuture(sync._shutdown)
     sync.subscriber = _RaisingSubscriber(failures=2, then=final)  # type: ignore[assignment]
 
-    with mock.patch.object(gmail_sync.time, "sleep"):
-        sync._serve_subscription()
+    sync._serve_subscription()
 
     assert sync.subscriber.subscribe_calls == 3  # type: ignore[attr-defined]
+
+
+def test_stop_signalled_during_subscribe_does_not_serve_the_new_stream(
+    no_sleep: list[float],
+) -> None:
+    """A signal landing inside subscribe() must still stop this stream.
+
+    Signal handlers run on this thread at a bytecode boundary, so a stop
+    requested during subscribe() cancelled whatever the previous iteration left
+    published -- never the stream being opened, which did not exist yet. Without
+    a re-check the loop blocks in result() on a healthy stream nobody will
+    cancel, ignoring SIGTERM until the stream breaks on its own.
+    """
+    sync = _bare_sync()
+    served: list[str] = []
+
+    class _NeverReturningFuture(_FakeFuture):
+        def result(self) -> None:
+            served.append("result")
+
+    class _SignallingSubscriber(_FakeSubscriber):
+        def subscribe(self, path: str, **kwargs: Any) -> _FakeFuture:
+            future = super().subscribe(path, **kwargs)
+            sync._stop_requested = True  # the signal arrives mid-open
+            return future
+
+    future = _NeverReturningFuture()
+    sync.subscriber = _SignallingSubscriber([future])  # type: ignore[assignment]
+
+    sync._serve_subscription()
+
+    assert served == [], "committed to result() on a stream that was already stopping"
+    assert future.cancelled, "the stream opened during the stop was left running"
+    assert sync.subscriber.subscribe_calls == 1  # type: ignore[attr-defined]
+
+
+def test_interruptible_sleep_returns_early_on_a_stop_request() -> None:
+    """The backoff wait must notice a stop rather than run to term.
+
+    time.sleep() is resumed with the remaining time after a signal handler
+    returns normally (PEP 475), so a SIGTERM one second into a saturated backoff
+    would otherwise wait out the rest -- measured at a full 2.0s for a 2s sleep
+    signalled at 0.3s. Backoff reaches 300s; `docker stop` gives 10.
+    """
+    sync = _bare_sync()
+
+    def _signal_soon() -> None:
+        time.sleep(0.05)
+        sync._stop_requested = True
+
+    threading.Thread(target=_signal_soon, daemon=True).start()
+    started = time.monotonic()
+
+    sync._interruptible_sleep(5.0)
+
+    assert time.monotonic() - started < 2.0, "slept through a stop request"
+
+
+def test_interruptible_sleep_waits_when_nothing_asks_it_to_stop() -> None:
+    """It must still be a wait, not a no-op."""
+    sync = _bare_sync()
+    started = time.monotonic()
+
+    sync._interruptible_sleep(0.2)
+
+    assert time.monotonic() - started >= 0.2
 
 
 def test_clean_close_while_running_reopens_the_stream(
@@ -291,9 +400,9 @@ def test_reconnecting_past_the_overflow_point(
 
     calculate_backoff_delay computes multiplier ** attempt before clamping to
     max_delay, and 2.0 ** 1024 raises OverflowError. This loop has no retry
-    limit and the incident that prompted it reached 1119 consecutive failures,
-    so an uncapped counter would crash inside the handler meant to prevent the
-    crash.
+    limit, and the last incident restarted the container 1119 times in two days
+    -- that volume of failures without the restarts to reset the counter, so an
+    uncapped counter would crash inside the code meant to prevent the crash.
     """
     # Each failure logs a formatted traceback, which dominates the runtime at
     # this iteration count and tests nothing here.
@@ -337,31 +446,140 @@ def test_shutdown_during_backoff_skips_the_sleep(no_sleep: list[float]) -> None:
         [_ShutdownOnCancel(RuntimeError("stream died"))]
     )
 
+    reconnects_before = _reconnects()
+    errors_before = _stream_errors()
+
     sync._serve_subscription()
 
     assert no_sleep == [], "slept through a requested shutdown"
     assert sync.subscriber.subscribe_calls == 1  # type: ignore[attr-defined]
+    # The failure that ends the loop is a failure, not a reconnect. This is the
+    # only case where the two counter placements disagree.
+    assert _reconnects() == reconnects_before
+    assert _stream_errors() == errors_before + 1
 
 
 def test_reconnect_counters_increment(no_sleep: list[float]) -> None:
-    """The counters are the only external signal that the loop is working.
+    """Reconnects must be visible in metrics, not only in logs.
 
-    The incident narrative is that the container looked healthy throughout, so a
-    metric that silently stopped incrementing would reproduce it.
+    Nothing reported the container unhealthy during the incident -- there is no
+    healthcheck -- so a counter that stopped incrementing would hide a repeat.
     """
-    before = gmail_sync.PUBSUB_STREAM_RECONNECTS._value.get()
+    reconnects_before = _reconnects()
+    errors_before = _stream_errors()
     sync = _make_sync_stopping([RuntimeError("stream died")] * 2)
 
     sync._serve_subscription()
 
-    after = gmail_sync.PUBSUB_STREAM_RECONNECTS._value.get()
-    assert after - before == 2
+    assert _reconnects() - reconnects_before == 2
+    assert _stream_errors() - errors_before == 2
+
+
+def test_a_failing_cancel_does_not_end_the_loop(no_sleep: list[float]) -> None:
+    """cancel() runs on a transport that has just failed and may itself raise.
+
+    Unsuppressed, that exception escapes the handler written to keep the process
+    alive -- the failure mode this whole method exists to remove.
+    """
+    sync = _bare_sync()
+    sync.subscriber = _FakeSubscriber(  # type: ignore[assignment]
+        [
+            _UncancellableFuture(RuntimeError("stream died")),
+            _StoppingFuture(sync._shutdown),
+        ]
+    )
+
+    sync._serve_subscription()
+
+    assert sync.subscriber.subscribe_calls == 2  # type: ignore[attr-defined]
+
+
+def test_slow_subscribe_does_not_count_as_a_healthy_stream(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
+) -> None:
+    """Time spent opening the stream is not time the stream was up.
+
+    Without restarting the clock after subscribe() returns, a subscribe() that
+    hangs for STREAM_HEALTHY_SECONDS and then fails resets the backoff every
+    time, and the service reconnects hot forever.
+    """
+    now = [0.0]
+    monkeypatch.setattr(gmail_sync.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(gmail_sync, "logger", _SilentLogger())
+
+    sync = _bare_sync()
+    futures: list[_FakeFuture] = [_FakeFuture(RuntimeError("died")) for _ in range(3)]
+    futures.append(_StoppingFuture(sync._shutdown))
+
+    class _SlowSubscriber(_FakeSubscriber):
+        def subscribe(self, path: str, **kwargs: Any) -> _FakeFuture:
+            # The whole healthy interval is burned inside the open, not serving.
+            now[0] += gmail_sync.STREAM_HEALTHY_SECONDS + 1.0
+            return super().subscribe(path, **kwargs)
+
+    sync.subscriber = _SlowSubscriber(futures)  # type: ignore[assignment]
+
+    sync._serve_subscription()
+
+    assert no_sleep == sorted(no_sleep)
+    assert no_sleep[0] < no_sleep[-1], f"backoff never escalated: {no_sleep}"
+
+
+def test_repeated_failures_escalate_from_warning_to_error(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
+) -> None:
+    """One reconnect is routine; a stream that stays down is not.
+
+    Also pins the payload: the traceback and the token diagnostics must ride
+    along, and flat rather than under an "extra" key.
+    """
+    log = _RecordingLogger()
+    monkeypatch.setattr(gmail_sync, "logger", log)
+    threshold = gmail_sync.STREAM_FAILURES_BEFORE_ERROR
+    sync = _make_sync_stopping([RuntimeError("stream died")] * threshold)
+
+    sync._serve_subscription()
+
+    assert log.levels == ["warning"] * (threshold - 1) + ["error"]
+    for _, _, kwargs in log.calls:
+        assert kwargs["exc_info"] is True
+        assert "token_expiry_utc" in kwargs
+        assert "extra" not in kwargs
+
+
+def test_clean_close_is_logged_without_an_exception(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
+) -> None:
+    """There is no traceback to attach when nothing raised."""
+    log = _RecordingLogger()
+    monkeypatch.setattr(gmail_sync, "logger", log)
+    sync = _bare_sync()
+    sync.subscriber = _FakeSubscriber(  # type: ignore[assignment]
+        [_FakeFuture(), _StoppingFuture(sync._shutdown)]
+    )
+
+    sync._serve_subscription()
+
+    _level, message, kwargs = log.calls[0]
+    assert "closed without an error" in message
+    assert kwargs["exc_info"] is False
 
 
 def test_attempt_cap_keeps_the_delay_maths_finite() -> None:
-    """The cap exists only to keep multiplier ** attempt finite."""
-    multiplier = STREAM_BACKOFF_CONFIG.multiplier
-    assert multiplier**STREAM_BACKOFF_ATTEMPT_CAP < float("inf")
+    """The cap must keep calculate_backoff_delay returning rather than raising.
+
+    Asserting `multiplier ** cap < inf` would be worse than useless: float ** int
+    raises OverflowError rather than returning inf, so that expression can only
+    error, never evaluate False, and a cap of 1023 would pass it.
+    """
+    delay = gmail_sync.calculate_backoff_delay(
+        STREAM_BACKOFF_ATTEMPT_CAP, STREAM_BACKOFF_CONFIG
+    )
+
+    assert delay == pytest.approx(
+        STREAM_BACKOFF_CONFIG.max_delay,
+        rel=STREAM_BACKOFF_CONFIG.jitter + 0.01,
+    )
 
 
 def test_backoff_saturates_well_before_the_cap() -> None:
@@ -398,6 +616,45 @@ def test_drain_and_close_tolerates_never_having_subscribed() -> None:
     sync._drain_and_close()  # must not raise
 
 
+def test_drain_and_close_waits_for_in_flight_work_before_closing() -> None:
+    """Stop admitting work, drain what is running, only then close the stream.
+
+    The wait is the reason this method exists, and without pinning the order it
+    can silently degrade to close-then-wait -- which drops the in-flight work
+    the drain was added to protect.
+    """
+    sync = _bare_sync()
+    order: list[str] = []
+
+    class _RecordingFuture(_FakeFuture):
+        def cancel(self) -> None:
+            order.append("cancel")
+            super().cancel()
+
+        def result(self, timeout: float | None = None) -> None:
+            order.append(f"result:{timeout}")
+
+    sync._streaming_pull_future = _RecordingFuture()
+    real_wait = sync._shutdown.wait_for_completion
+
+    def _wait(timeout: float = 30.0) -> bool:
+        order.append(f"wait:{timeout}")
+        return real_wait(timeout)
+
+    sync._shutdown.wait_for_completion = _wait  # type: ignore[method-assign]
+
+    sync._drain_and_close()
+
+    # The close is bounded too: cancel() hands off to a daemon thread that only
+    # resolves the future once callbacks have drained, so an unbounded result()
+    # would block past any stop grace period.
+    assert order == [
+        "cancel",
+        f"wait:{gmail_sync.SHUTDOWN_TIMEOUT_SECONDS}",
+        f"result:{gmail_sync.SHUTDOWN_TIMEOUT_SECONDS}",
+    ]
+
+
 def test_drain_and_close_survives_a_future_that_reraises() -> None:
     """A stream that failed on the way out re-raises from result().
 
@@ -410,30 +667,83 @@ def test_drain_and_close_survives_a_future_that_reraises() -> None:
     sync._drain_and_close()  # must not raise
 
 
-def test_signal_handlers_request_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
-    """SIGTERM must reach the shutdown flag.
-
-    `docker stop` sends SIGTERM. With no handler the process was killed outright;
-    the reconnect loop's should_continue() guards could never fire in production,
-    since the only caller of initiate() ran on the same thread as the loop.
-    """
+def _install_and_capture(
+    sync: GmailSync, monkeypatch: pytest.MonkeyPatch
+) -> dict[int, Any]:
     installed: dict[int, Any] = {}
     monkeypatch.setattr(
         gmail_sync.signal,
         "signal",
         lambda sig, handler: installed.__setitem__(sig, handler),
     )
+    sync._install_signal_handlers()
+    return installed
+
+
+def test_signal_handler_only_sets_a_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The handler must take no lock.
+
+    Signal handlers run on the main thread, so anything here that takes a lock
+    the main thread may already hold deadlocks the process against itself.
+    GracefulShutdown.initiate() takes one and wait_for_completion() holds it --
+    which is exactly where a second SIGTERM lands during the drain.
+    """
     sync = _bare_sync()
     future = _FakeFuture()
     sync._streaming_pull_future = future
-
-    sync._install_signal_handlers()
+    installed = _install_and_capture(sync, monkeypatch)
 
     assert set(installed) == {gmail_sync.signal.SIGTERM, gmail_sync.signal.SIGINT}
     installed[gmail_sync.signal.SIGTERM](gmail_sync.signal.SIGTERM, None)
 
+    assert sync._stop_requested is True
+    # The handler itself does none of this work.
+    assert sync._shutdown.should_continue()
+    assert not future.cancelled
+
+
+def test_repeated_signals_do_not_deadlock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second signal during the drain must not wedge the process.
+
+    The main thread holds GracefulShutdown's lock for most of
+    wait_for_completion, so a handler that took it would block on a lock only
+    the suspended main thread could release.
+    """
+    sync = _bare_sync()
+    installed = _install_and_capture(sync, monkeypatch)
+    handler = installed[gmail_sync.signal.SIGTERM]
+
+    with sync._shutdown._lock:  # the main thread, mid-wait
+        handler(gmail_sync.signal.SIGTERM, None)
+        handler(gmail_sync.signal.SIGTERM, None)
+
+    assert sync._stop_requested is True
+
+
+def test_consume_stop_request_cancels_the_live_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Translating the flag is what actually stops the stream."""
+    sync = _bare_sync()
+    future = _FakeFuture()
+    sync._streaming_pull_future = future
+    installed = _install_and_capture(sync, monkeypatch)
+    installed[gmail_sync.signal.SIGTERM](gmail_sync.signal.SIGTERM, None)
+
+    assert sync._consume_stop_request() is True
+
     assert not sync._shutdown.should_continue()
-    assert future.cancelled, "the live stream was not cancelled on SIGTERM"
+    assert future.cancelled, "the live stream was not cancelled"
+
+
+def test_consume_stop_request_survives_a_failing_cancel() -> None:
+    """A cancel() that raises must not stop the shutdown from proceeding."""
+    sync = _bare_sync()
+    sync._streaming_pull_future = _UncancellableFuture()
+    sync._stop_requested = True
+
+    assert sync._consume_stop_request() is True
+    assert not sync._shutdown.should_continue()
 
 
 def test_run_installs_signal_handlers_and_drains(
