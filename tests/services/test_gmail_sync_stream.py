@@ -298,8 +298,11 @@ def test_stop_is_noticed_while_the_stream_is_healthy(no_sleep: list[float]) -> N
             return self.cancelled
 
         def result(self, timeout: float | None = None) -> None:
-            if self.cancelled:
-                return
+            # Honouring the timeout is the point. A fake that merely accepts it
+            # lets an unbounded wait -- the production defect -- pass.
+            assert (
+                timeout is not None and timeout <= gmail_sync.STOP_POLL_SECONDS
+            ), f"awaited with timeout={timeout}: a stop could not be noticed"
             self.polls += 1
             if self.polls == 3:  # the signal lands mid-stream
                 sync._stop_requested = True
@@ -307,12 +310,17 @@ def test_stop_is_noticed_while_the_stream_is_healthy(no_sleep: list[float]) -> N
 
     future = _HealthyStream()
     sync.subscriber = _FakeSubscriber([future])  # type: ignore[assignment]
+    errors_before = _stream_errors()
 
     sync._serve_subscription()
 
     assert future.cancelled, "a stop during a healthy stream was never acted on"
     assert sync.subscriber.subscribe_calls == 1  # type: ignore[attr-defined]
     assert no_sleep == [], "treated a requested stop as a failure to back off from"
+    # Reading the flag without initiating the shutdown would leave the loop to
+    # treat this as a stream failure: an error log and a counter bump on every
+    # graceful stop, which is the false alarm this work exists to avoid.
+    assert _stream_errors() == errors_before, "a clean stop was counted as a failure"
 
 
 def test_a_stream_that_ends_in_timeout_is_not_mistaken_for_a_poll(
@@ -731,6 +739,9 @@ def test_repeated_failures_escalate_from_warning_to_error(
     sync._serve_subscription()
 
     assert log.levels == ["warning"] * (threshold - 1) + ["error"]
+    # Not just the type: "401 ACCESS_TOKEN_EXPIRED" is the whole diagnosis in the
+    # incident this exists for, and it lives in the message.
+    assert "stream died" in log.calls[0][1]
     for _, _, kwargs in log.calls:
         # The exception instance, not True: emit() runs outside the except
         # block, where exc_info=True resolves against a cleared sys.exc_info()
@@ -833,7 +844,9 @@ def test_drain_and_close_tolerates_never_having_subscribed() -> None:
     sync._drain_and_close()  # must not raise
 
 
-def test_drain_and_close_waits_for_in_flight_work_before_closing() -> None:
+def test_drain_and_close_waits_for_in_flight_work_before_closing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Stop admitting work, drain what is running, only then close the stream.
 
     The wait is the reason this method exists, and without pinning the order it
@@ -842,6 +855,12 @@ def test_drain_and_close_waits_for_in_flight_work_before_closing() -> None:
     """
     sync = _bare_sync()
     order: list[str] = []
+    # A controlled clock: with a close that returns instantly, "remaining" is the
+    # full budget minus microseconds and a stacked wait is indistinguishable from
+    # a shared one.
+    now = [0.0]
+    monkeypatch.setattr(gmail_sync.time, "monotonic", lambda: now[0])
+    spent = gmail_sync.SHUTDOWN_TIMEOUT_SECONDS * 0.6
 
     class _RecordingFuture(_FakeFuture):
         def cancel(self) -> None:
@@ -850,6 +869,7 @@ def test_drain_and_close_waits_for_in_flight_work_before_closing() -> None:
 
         def result(self, timeout: float | None = None) -> None:
             order.append(f"result:{timeout}")
+            now[0] += spent  # the close eats most of the budget
 
     sync._streaming_pull_future = _RecordingFuture()
     real_wait = sync._shutdown.wait_for_completion
@@ -871,8 +891,34 @@ def test_drain_and_close_waits_for_in_flight_work_before_closing() -> None:
     # finished" while notifications are still starting.
     assert [step.split(":")[0] for step in order] == ["cancel", "result", "wait"]
     assert order[1] == f"result:{gmail_sync.SHUTDOWN_TIMEOUT_SECONDS}"
-    # And the two waits share one budget rather than stacking to double it.
-    assert float(order[2].split(":")[1]) <= gmail_sync.SHUTDOWN_TIMEOUT_SECONDS
+    # The two waits share one budget rather than stacking to double it: what the
+    # close spent is gone from what the drain gets.
+    assert float(order[2].split(":")[1]) == pytest.approx(
+        gmail_sync.SHUTDOWN_TIMEOUT_SECONDS - spent
+    )
+
+
+def test_drain_and_close_never_passes_a_negative_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A close that eats the whole budget must clamp, not go negative."""
+    sync = _bare_sync()
+    waits: list[float] = []
+    now = [0.0]
+    monkeypatch.setattr(gmail_sync.time, "monotonic", lambda: now[0])
+
+    class _SlowClose(_FakeFuture):
+        def result(self, timeout: float | None = None) -> None:
+            now[0] += gmail_sync.SHUTDOWN_TIMEOUT_SECONDS * 2
+
+    sync._streaming_pull_future = _SlowClose()
+    sync._shutdown.wait_for_completion = lambda timeout=30.0: (  # type: ignore[method-assign]
+        waits.append(timeout) or True
+    )
+
+    sync._drain_and_close()
+
+    assert waits == [0.0]
 
 
 def test_drain_and_close_survives_a_future_that_reraises() -> None:
@@ -994,6 +1040,36 @@ def test_run_installs_signal_handlers_and_drains(
     sync.run()
 
     assert calls == ["signals", "served", "drained"]
+
+
+def test_run_drains_when_the_serve_loop_escapes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpected escape must not abandon in-flight notifications.
+
+    _serve_subscription's whole post-failure block runs outside its own try --
+    the backoff maths, the structlog call, the counters, the wait -- and that is
+    error-path code by definition. Both other run() tests exit through paths the
+    pre-finally code already reached, so neither can see this.
+    """
+    sync = _bare_sync()
+    drained: list[bool] = []
+
+    def _explode(_self: Any) -> None:
+        raise RuntimeError("backoff maths blew up")
+
+    monkeypatch.setattr(GmailSync, "_install_signal_handlers", lambda _s: None)
+    monkeypatch.setattr(GmailSync, "_check_watch_health", lambda _s: None)
+    monkeypatch.setattr(GmailSync, "renew_watch", lambda _s: None)
+    monkeypatch.setattr(GmailSync, "run_scheduler", lambda _s: None)
+    monkeypatch.setattr(GmailSync, "_serve_subscription", _explode)
+    monkeypatch.setattr(GmailSync, "_drain_and_close", lambda _s: drained.append(True))
+    monkeypatch.setattr(gmail_sync.schedule, "every", lambda *a, **k: mock.MagicMock())
+
+    with pytest.raises(RuntimeError, match="backoff maths blew up"):
+        sync.run()
+
+    assert drained == [True], "an unexpected escape skipped the drain"
 
 
 def test_run_drains_after_an_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:
