@@ -1,5 +1,6 @@
 """Tests for DuckDB API endpoints."""
 
+import base64
 import os
 import tempfile
 from pathlib import Path
@@ -244,3 +245,78 @@ def test_bodies_max_limit(client):
     response = client.get("/bodies", params={"gmail_ids": gmail_ids})
     assert response.status_code == 400
     assert "Max 100 gmail_ids" in response.json()["detail"]
+
+
+def test_mail_text_converts_mislabelled_html_in_text_plain(client):
+    """A text/plain part that is actually HTML must still be converted.
+
+    This branch had no coverage: forcing _looks_like_html to return False left
+    all 257 tests green, so nothing pinned the mislabelled-HTML path.
+    """
+    client.post(
+        "/body",
+        json={
+            "gmail_id": "mislabelled1",
+            "parts": [
+                {
+                    "mimeType": "text/plain",
+                    "body": {
+                        "data": "PGRpdiBzdHlsZT0iY29sb3I6IzMzMyI-PHRhYmxlIGNlbGxwYWRkaW5nPSIwIj48dHI-PHRkPjxiPlJldW5pJm9hY3V0ZTtuPC9iPiB3aXRoIEpvcyYjMjMzOzwvdGQ-PC90cj48L3RhYmxlPjwvZGl2Pg=="
+                    },
+                }
+            ],
+            "body_data": None,
+        },
+    )
+    text = client.get("/mail_text", params={"gmail_id": "mislabelled1"}).json()["text"]
+    # The conversion happened (markup gone, emphasis rendered) and the accented
+    # character survived as itself rather than being flattened to "o".
+    assert "<table" not in text and "<div" not in text
+    assert "ón" in text and "José" in text, text
+    # KNOWN UPSTREAM DEFECT (cortex-1erc): html2text inserts a spurious space
+    # when an entity sits inside an emphasis tag, so this arrives as
+    # "**Reuni ón**". Asserted as-is so the day html2text fixes it, this test
+    # fails and tells us rather than silently drifting.
+    assert "**Reuni ón**" in text, text
+
+
+def test_mail_text_converts_html_in_body_data_without_parts(client):
+    """Some senders put HTML in body_data with no structured parts at all."""
+    client.post(
+        "/body",
+        json={
+            "gmail_id": "mislabelled2",
+            "parts": [],
+            "body_data": "PGRpdiBzdHlsZT0iY29sb3I6IzMzMyI-PHRhYmxlIGNlbGxwYWRkaW5nPSIwIj48dHI-PHRkPjxiPlJldW5pJm9hY3V0ZTtuPC9iPiB3aXRoIEpvcyYjMjMzOzwvdGQ-PC90cj48L3RhYmxlPjwvZGl2Pg==",
+        },
+    )
+    text = client.get("/mail_text", params={"gmail_id": "mislabelled2"}).json()["text"]
+    assert "José" in text, text
+    assert "cellpadding" not in text
+
+
+def test_mail_text_leaves_genuine_plain_text_alone(client):
+    """The other side of the heuristic: real prose must not be mangled.
+
+    Asserts EXACT equality, not a substring. A substring assertion passes even
+    when the text is wrongly run through html2text, because prose survives the
+    round trip nearly intact -- so it proved nothing. The paragraph break is
+    what actually discriminates: conversion collapses "a,\n\nb" to "a, b".
+    """
+    plain = "Dear families,\n\nConferences are on Tuesday. Sign up via the office.\n"
+    # Encoded from `plain` rather than pasted as a base64 literal, so the fixture
+    # and the assertion cannot drift apart into a test that compares a stored
+    # string against a different stored string.
+    encoded = base64.urlsafe_b64encode(plain.encode()).decode()
+    client.post(
+        "/body",
+        json={
+            "gmail_id": "genuinely-plain",
+            "parts": [{"mimeType": "text/plain", "body": {"data": encoded}}],
+            "body_data": None,
+        },
+    )
+    text = client.get("/mail_text", params={"gmail_id": "genuinely-plain"}).json()[
+        "text"
+    ]
+    assert text == plain, f"plain text was altered: {text!r}"
