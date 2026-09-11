@@ -295,7 +295,13 @@ def test_mail_text_converts_html_in_body_data_without_parts(client):
 
 
 def test_mail_text_leaves_genuine_plain_text_alone(client):
-    """The other side of the heuristic: real prose must not be mangled."""
+    """The other side of the heuristic: real prose must not be mangled.
+
+    Asserts EXACT equality, not a substring. A substring assertion passes even
+    when the text is wrongly run through html2text, because prose survives the
+    round trip nearly intact -- so it proved nothing. The paragraph break is
+    what actually discriminates: conversion collapses "a,\n\nb" to "a, b".
+    """
     plain = "Dear families,\n\nConferences are on Tuesday. Sign up via the office.\n"
     client.post(
         "/body",
@@ -315,4 +321,4 @@ def test_mail_text_leaves_genuine_plain_text_alone(client):
     text = client.get("/mail_text", params={"gmail_id": "genuinely-plain"}).json()[
         "text"
     ]
-    assert "Conferences are on Tuesday" in text
+    assert text == plain, f"plain text was altered: {text!r}"
