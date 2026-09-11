@@ -7,16 +7,16 @@ since DuckDB doesn't support multiple concurrent connections.
 import base64
 import json
 import os
-import re
 import threading
 import time
 from contextlib import asynccontextmanager
 from typing import Any
 
 import duckdb
-import html2text
 import uvicorn
 from cortex_utils.logging import configure_logging, get_logger
+from cortex_utils.mailtext import html_to_markdown as _shared_html_to_markdown
+from cortex_utils.mailtext import looks_like_html as _looks_like_html
 from cortex_utils.metrics import ERRORS, start_metrics_server
 from fastapi import FastAPI, HTTPException, Query, Request
 from prometheus_client import REGISTRY, Counter, Gauge, Histogram
@@ -26,40 +26,25 @@ from starlette.responses import Response
 
 logger = get_logger(__name__)
 
+
+def _html_to_markdown(html_content: str) -> str:
+    """Typed passthrough to cortex_utils.mailtext.html_to_markdown.
+
+    cortex-utils ships no py.typed marker, so everything imported from it
+    arrives as Any and returning one straight out of a `-> str | None` function
+    trips mypy's no-any-return. This shim is the annotation, nothing else --
+    delete it when cortex-sp3g adds the marker.
+    """
+    result: str = _shared_html_to_markdown(html_content)
+    return result
+
+
 DUCKDB_PATH = os.environ.get("DUCKDB_PATH", "/app/data/emails.duckdb")
 HOST = os.environ.get("DUCKDB_API_HOST", "0.0.0.0")
 PORT = int(os.environ.get("DUCKDB_API_PORT", "8081"))
 # Default limit for /gmail_ids endpoint (prevents OOM on large mailboxes)
 # Set to 0 to allow unlimited queries by default (not recommended for production)
 GMAIL_IDS_DEFAULT_LIMIT = int(os.environ.get("GMAIL_IDS_DEFAULT_LIMIT", "10000"))
-
-# HTML detection constants - patterns that indicate code rather than HTML email
-_CODE_PATTERNS = (
-    "<?xml",  # XML declaration
-    "<configuration>",  # Config files
-    "<project>",  # Maven/build files
-    '{"',  # JSON (not HTML)
-    "{{",  # Template variables
-    "<template>",  # Template files
-)
-
-# HTML detection constants - email-specific HTML patterns
-_HTML_INDICATORS = (
-    "<!doctype html",
-    "<html",
-    "<head>",
-    "<body",
-    "<div",
-    "<table",
-    "<tr>",
-    "<td",
-    "cellpadding=",  # Table attributes common in email HTML
-    "cellspacing=",
-    "bgcolor=",
-    'align="center"',  # Email layout patterns
-    'style="',  # Inline styles (common in emails)
-    'class="',
-)
 
 
 def _get_or_create_metric(
@@ -123,14 +108,6 @@ DUCKDB_DATABASE_SIZE = _get_or_create_metric(
     "Size of DuckDB database file",
 )
 
-# Configure html2text for clean markdown output
-_html2text = html2text.HTML2Text()
-_html2text.ignore_links = False  # Keep link URLs as markdown [text](url)
-_html2text.ignore_images = True  # Skip image references
-_html2text.ignore_emphasis = False  # Keep **bold** and *italic* markdown
-_html2text.body_width = 0  # Don't wrap lines
-_html2text.single_line_break = True  # More compact output
-
 
 def _decode_base64_urlsafe(data: str) -> str:
     """Decode base64 URL-safe encoded data (Gmail API format)."""
@@ -141,55 +118,6 @@ def _decode_base64_urlsafe(data: str) -> str:
         return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
     except (ValueError, UnicodeDecodeError):
         return ""
-
-
-def _html_to_markdown(html_content: str) -> str:
-    """Convert HTML to markdown using html2text."""
-    result: str = _html2text.handle(html_content)
-    return result.strip()
-
-
-def _looks_like_html(text: str) -> bool:
-    """Check if text appears to contain significant HTML markup.
-
-    Some email senders incorrectly label HTML content as text/plain.
-    This detects that case so we can run the content through html2text.
-
-    Uses conservative thresholds to avoid false positives:
-    - Minimum 50 chars (very short text can't be meaningful HTML)
-    - Check first 8KB (some emails have long tracking URLs before HTML content)
-    - Require 5+ HTML tags (increased from 3 to reduce false positives from XML/code)
-    - Require 2+ email-specific HTML indicators
-    - Exclude patterns that suggest code/XML rather than email HTML
-    """
-    # Minimum length check - very short text can't be meaningful HTML
-    if not text or len(text) < 50:
-        return False
-
-    # Sample first 8KB - some emails have long tracking URLs before HTML content
-    sample = text[:8000]
-
-    # Fast path: if no angle brackets, definitely not HTML
-    if "<" not in sample:
-        return False
-
-    # Exclude patterns that suggest code/configuration rather than HTML email
-    sample_lower = sample.lower()
-    if any(pattern in sample_lower for pattern in _CODE_PATTERNS):
-        return False
-
-    # Count HTML-like tags (require 5+ to avoid false positives from small XML snippets)
-    # This pattern excludes self-closing XML tags and requires proper tag structure
-    tags = re.findall(r"<[a-zA-Z][a-zA-Z0-9]*[^>]*>", sample)
-    if len(tags) < 5:
-        return False
-
-    # Check for email-specific HTML patterns (require 2+ indicators)
-    # Focus on patterns unique to HTML emails, not general HTML/XML
-    indicator_count = sum(1 for ind in _HTML_INDICATORS if ind in sample_lower)
-
-    # Both conditions must be met to classify as HTML
-    return len(tags) >= 5 and indicator_count >= 2
 
 
 def _safe_json_loads(data: str | None, context_id: str) -> Any | None:
