@@ -15,6 +15,11 @@ from typing import Any
 import duckdb
 import uvicorn
 from cortex_utils.logging import configure_logging, get_logger
+
+# Both are cortex-utils PUBLIC API despite the leading underscores. They are
+# aliased to the names the call sites below already used, so lifting the
+# implementation out of this file did not have to touch six unrelated lines.
+# Grep cortex_utils/mailtext.py for the implementations, not this file.
 from cortex_utils.mailtext import html_to_markdown as _shared_html_to_markdown
 from cortex_utils.mailtext import looks_like_html as _looks_like_html
 from cortex_utils.metrics import ERRORS, start_metrics_server
