@@ -1,5 +1,6 @@
 """Tests for DuckDB API endpoints."""
 
+import base64
 import os
 import tempfile
 from pathlib import Path
@@ -303,18 +304,15 @@ def test_mail_text_leaves_genuine_plain_text_alone(client):
     what actually discriminates: conversion collapses "a,\n\nb" to "a, b".
     """
     plain = "Dear families,\n\nConferences are on Tuesday. Sign up via the office.\n"
+    # Encoded from `plain` rather than pasted as a base64 literal, so the fixture
+    # and the assertion cannot drift apart into a test that compares a stored
+    # string against a different stored string.
+    encoded = base64.urlsafe_b64encode(plain.encode()).decode()
     client.post(
         "/body",
         json={
             "gmail_id": "genuinely-plain",
-            "parts": [
-                {
-                    "mimeType": "text/plain",
-                    "body": {
-                        "data": "RGVhciBmYW1pbGllcywKCkNvbmZlcmVuY2VzIGFyZSBvbiBUdWVzZGF5LiBTaWduIHVwIHZpYSB0aGUgb2ZmaWNlLgo="
-                    },
-                }
-            ],
+            "parts": [{"mimeType": "text/plain", "body": {"data": encoded}}],
             "body_data": None,
         },
     )
