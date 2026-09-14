@@ -1,6 +1,26 @@
 -- Migration: make the email-mapping upsert arbiter match the schema
 -- Related: cortex-apd6 (schema drift), cortex-rj2b (the corruption it masked)
 --
+-- !! ORDERING: DEPLOY THE CODE FIRST. !!
+--
+--   This migration DROPS the constraint that older cortex-utils names in
+--   `ON CONFLICT ON CONSTRAINT unique_email_mapping`. Run it against a
+--   gateway still running that code and every `PUT /config` fails with
+--   "constraint unique_email_mapping ... does not exist" -- config imports
+--   are dead until the deploy lands.
+--
+--   Learned the hard way on 2026-09-14: applied ahead of the deploy, broke
+--   imports, restored the constraint by hand to unbreak production.
+--
+--   Correct order:
+--     1. merge + deploy gateway with cortex-utils >= 01bf644
+--        (upsert infers the partial index instead of naming the constraint)
+--     2. confirm: PUT /config succeeds
+--     3. THEN run this migration
+--     4. confirm: PUT /config still succeeds
+--
+--   Safe to run twice; the DROP is IF EXISTS.
+--
 -- PROBLEM
 --   import_yaml_to_db() upserted with `ON CONFLICT ON CONSTRAINT
 --   unique_email_mapping`. That constraint is created by migration 002 on the
