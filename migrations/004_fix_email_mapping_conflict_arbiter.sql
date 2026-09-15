@@ -102,10 +102,20 @@ BEGIN;
 -- pg_settings, so `source = 'session'` is not available either. Each round
 -- closed one hole and the next round found another.
 --
--- A temp table has no such ladder on the server. It lives in a schema private
--- to one backend, is destroyed when that backend disconnects, and no
--- SERVER-side configuration -- postgresql.conf, pg_db_role_setting, a role or
--- database default, a restored dump -- can create one. `pg_temp` cannot be
+-- A temp table has no such ladder on the server, ON POSTGRES 16, which is what
+-- cortex-postgres runs. It lives in a schema private to one backend, is
+-- destroyed when that backend disconnects, and no server-side configuration
+-- reachable in 16 -- postgresql.conf, pg_db_role_setting, a role or database
+-- default -- can create one.
+--
+-- That qualifier is load-bearing, and was added because the unqualified claim
+-- was wrong: PostgreSQL 17 adds `ON login` event triggers, which run SQL from
+-- the CATALOG at every connection and can create the temp table for every
+-- session. Review verified it on a throwaway 17 -- gate refuses before,
+-- commits after, with -X and no token -- and pg_dump -s carries such a
+-- trigger, so 'a restored dump' becomes a vector too. If cortex-postgres is
+-- ever upgraded past 16, this gate needs an `ON login` event-trigger check or
+-- a different mechanism. `pg_temp` cannot be
 -- shadowed either: `pg_` is a reserved schema prefix, and the alias resolves
 -- to this backend's own temp schema, which does not exist until this backend
 -- makes it. Its existence is therefore the fact the gate is asking about
@@ -185,24 +195,48 @@ BEGIN
             'idx_email_mappings_active missing/invalid: import_yaml_to_db upsert will fail';
     END IF;
 
+    -- Anchor on (indrelid, relname), NOT on 'name'::regclass.
+    --
+    -- regclass resolves through search_path, while the EXISTS check above
+    -- resolves by table + name. When those disagree -- another schema ahead of
+    -- public holding an index of this name -- the two halves of this block
+    -- inspect DIFFERENT INDEXES, and the column check silently vouches for an
+    -- index on another table. Round 6 review reproduced the result: the
+    -- migration printed 'OK: ... is the sole upsert arbiter' and COMMITted
+    -- while the real arbiter was on (email_address) alone, and the next upsert
+    -- died with 'no unique or exclusion constraint matching the ON CONFLICT
+    -- specification' -- the precise error this check exists to pre-empt.
+    -- A false PASS, which is strictly worse than a false abort.
+    --
     -- Slice to indnkeyatts: INCLUDE columns sit in indkey after the key
     -- columns but play no part in ON CONFLICT inference, so folding them
     -- into this comparison would false-fail on an index that is actually
     -- fine. LEFT JOIN because an expression column has attnum 0 and no
     -- pg_attribute row -- an INNER JOIN silently drops it and reports a
     -- truncated column list, which fails safe but misleadingly.
-    SELECT array_agg(coalesce(a.attname, '(expression)') ORDER BY k.ord)
+    --
+    -- ORDER BY the column NAME, not by ordinal position: ON CONFLICT infers an
+    -- arbiter by the SET of key columns, so (email_address, mapping_type) is
+    -- just as inferable as (mapping_type, email_address). Ordering by position
+    -- made this abort on a reversed index claiming 'inference will fail at
+    -- runtime', which review verified is false -- the upsert takes the DO
+    -- UPDATE arm and succeeds. The offender check below already sorts by name;
+    -- the two halves of this block disagreed.
+    SELECT array_agg(coalesce(a.attname::TEXT, '(expression)')
+                     ORDER BY coalesce(a.attname::TEXT, '(expression)'))
     INTO arbiter_cols
     FROM pg_index i
-    JOIN LATERAL unnest(i.indkey[0:i.indnkeyatts - 1]) WITH ORDINALITY AS k(attnum, ord)
-         ON TRUE
+    JOIN pg_class c ON c.oid = i.indexrelid
+    JOIN LATERAL unnest(i.indkey[0:i.indnkeyatts - 1]) AS k(attnum) ON TRUE
     LEFT JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
-    WHERE i.indexrelid = 'idx_email_mappings_active'::regclass;
+    WHERE i.indrelid = 'triage_email_mappings'::regclass
+      AND c.relname = 'idx_email_mappings_active';
 
-    IF arbiter_cols IS DISTINCT FROM ARRAY['mapping_type', 'email_address']::TEXT[] THEN
+    IF arbiter_cols IS DISTINCT FROM ARRAY['email_address', 'mapping_type']::TEXT[] THEN
         RAISE EXCEPTION
-            'idx_email_mappings_active is on columns %, expected (mapping_type, email_address): '
-            'ON CONFLICT inference will fail at runtime',
+            'idx_email_mappings_active is on columns % (sorted), expected '
+            '(email_address, mapping_type): ON CONFLICT inference will fail '
+            'at runtime',
             arbiter_cols;
     END IF;
 
