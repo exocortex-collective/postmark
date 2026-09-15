@@ -36,11 +36,21 @@
 --   WHERE deleted_at IS NULL.
 --
 --   So no migration in this repo creates unique_email_mapping on the current
---   table. Every config import worked in production only because someone had
---   hand-added an unconditional UNIQUE (mapping_type, email_address) named
---   unique_email_mapping directly on Hades. On a database built from these
---   migrations, `PUT /config` fails outright with
---   "constraint unique_email_mapping for table ... does not exist".
+--   table. It comes from the TRIAGE WORKER: _ensure_schema() in
+--   triage/src/triage/services/worker.py:1839 creates the table with
+--   `CONSTRAINT unique_email_mapping UNIQUE (mapping_type, email_address)`
+--   inline, and runs on every worker start.
+--
+--   (An earlier version of this comment blamed a hand-added constraint. That
+--   was wrong, and the wrong attribution hid the remaining work -- see below.)
+--
+--   CREATE TABLE IF NOT EXISTS no-ops on an existing table, so dropping the
+--   constraint here is durable on THIS database: restarting the worker
+--   afterwards does not resurrect it (verified both directions). But every
+--   FRESH database still gets it, which means this fix is incomplete until
+--   the worker is changed to create the partial unique index instead.
+--   Tracked as cortex-qvnz. Until then, a rebuilt-from-scratch cortex has
+--   the unconditional constraint back, and with it the soft-delete bug below.
 --
 --   The hand-added constraint is also semantically WRONG for this table.
 --   Being unconditional, it counts soft-deleted rows, so a mapping that was
@@ -66,12 +76,26 @@
 
 BEGIN;
 
+-- Fail fast rather than queueing. The ALTER TABLE below takes ACCESS
+-- EXCLUSIVE, and a lock request waits BEHIND any open reader while itself
+-- blocking every later reader of the table -- so one idle transaction turns a
+-- sub-second migration into an outage of triage_email_mappings. Everything
+-- here is one transaction, so timing out costs nothing but a re-run.
+SET LOCAL lock_timeout = '5s';
+
 -- 0. ORDERING GATE.
 --
 -- A comment is not a control. The warning above was written by the same
 -- person who then ran this ahead of the deploy twice on 2026-09-14/15,
 -- breaking PUT /config both times and restoring the constraint by hand.
--- So the ordering is now enforced, not merely documented.
+--
+-- WHAT THIS GATE DOES AND DOES NOT DO. It proves a human deliberately chose
+-- to run this migration in this session. It does NOT and CANNOT check that
+-- the code deploy actually happened: nothing in the database records which
+-- cortex-utils the gateway is importing. The gate fires green just as
+-- happily on a box where running this breaks `PUT /config` for the third
+-- time. Steps 1 and 2 below are yours to verify, and they are the ones that
+-- matter.
 --
 -- Run it like this, once the gateway is serving cortex-utils >= 01bf644:
 --
@@ -154,8 +178,26 @@ END $$;
 ALTER TABLE triage_email_mappings
     DROP CONSTRAINT IF EXISTS unique_email_mapping;
 
--- Same name may exist as a bare index rather than a constraint.
-DROP INDEX IF EXISTS unique_email_mapping;
+-- Same name may exist as a bare index rather than a constraint. Resolve it
+-- through the TABLE's schema, not search_path: an unqualified DROP INDEX
+-- silently drops a same-named index on an unrelated table if one sits earlier
+-- in the path, and this migration then commits reporting success. Same class
+-- the assertions below were fixed for.
+DO $$
+DECLARE
+    stray REGCLASS;
+BEGIN
+    SELECT i.indexrelid
+      INTO stray
+      FROM pg_index i
+      JOIN pg_class c ON c.oid = i.indexrelid
+     WHERE i.indrelid = 'triage_email_mappings'::regclass
+       AND c.relname = 'unique_email_mapping';
+
+    IF stray IS NOT NULL THEN
+        EXECUTE format('DROP INDEX %s', stray);
+    END IF;
+END $$;
 
 -- 2. Guarantee the real arbiter exists. Idempotent: 003 creates it, but a DB
 --    that skipped straight here (or had it dropped) still ends up correct.
