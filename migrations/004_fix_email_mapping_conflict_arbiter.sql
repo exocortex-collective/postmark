@@ -75,9 +75,11 @@ BEGIN;
 --
 -- Run it like this, once the gateway is serving cortex-utils >= 01bf644:
 --
---   psql -v ON_ERROR_STOP=1 \
+--   psql -X -v ON_ERROR_STOP=1 \
 --        -c "CREATE TEMP TABLE cortex_code_deployed ()" \
 --        -f migrations/004_fix_email_mapping_conflict_arbiter.sql
+--
+-- The -X is load-bearing. See "WHERE THE GATE STOPS" below.
 --
 -- WHY A TEMP TABLE AND NOT A GUC
 --
@@ -100,12 +102,32 @@ BEGIN;
 -- pg_settings, so `source = 'session'` is not available either. Each round
 -- closed one hole and the next round found another.
 --
--- A temp table has no such ladder. It lives in a schema private to one
--- backend, is destroyed when that backend disconnects, and there is no
--- configuration mechanism -- file, catalog, role, database or cluster -- that
--- can create one. Its existence is therefore proof of exactly the thing the
--- gate is asking about, rather than a proxy for it. Eight lines instead of
--- fifty-six, and nothing left to widen.
+-- A temp table has no such ladder on the server. It lives in a schema private
+-- to one backend, is destroyed when that backend disconnects, and no
+-- SERVER-side configuration -- postgresql.conf, pg_db_role_setting, a role or
+-- database default, a restored dump -- can create one. `pg_temp` cannot be
+-- shadowed either: `pg_` is a reserved schema prefix, and the alias resolves
+-- to this backend's own temp schema, which does not exist until this backend
+-- makes it. Its existence is therefore the fact the gate is asking about
+-- rather than a proxy for it.
+--
+-- WHERE THE GATE STOPS
+--
+-- Round 5 found the client-side equivalent of hole (4): psql runs its startup
+-- file before -c and -f, and that file takes DDL. A single line in ~/.psqlrc,
+-- $PSQLRC, or the system-wide <sysconfdir>/psqlrc (root-owned, applies to
+-- every user on the host) forges the token for every psql session, invisibly
+-- to any catalog query -- verified, all three run this migration to COMMIT
+-- with no -c token at all.
+--
+-- No server-side check can see that, which is why the fix is -X on the
+-- invocation rather than more SQL. And it is the honest boundary: whoever can
+-- write your psqlrc can run the DROP directly and skip the gate entirely.
+--
+-- So the gate is scoped to what it can actually enforce: it makes the
+-- ordering mistake hard to make BY ACCIDENT, and makes "set it once and
+-- forget" impossible on the server. It is not an authorisation control, and
+-- nothing here defends against someone determined to drop the constraint.
 DO $$
 BEGIN
     IF to_regclass('pg_temp.cortex_code_deployed') IS NULL THEN
@@ -212,9 +234,17 @@ BEGIN
      WHERE i.indrelid = 'triage_email_mappings'::regclass
        AND i.indisunique
        AND i.indpred IS NULL                    -- unconditional
-       AND (SELECT array_agg(a.attname::TEXT ORDER BY a.attname)
+       -- LEFT JOIN, for the same reason the arbiter check above uses one: an
+       -- expression key has attnum 0 and no pg_attribute row, and an INNER
+       -- JOIN silently drops it. Here that TRUNCATION MAKES A NON-MATCHING
+       -- INDEX MATCH -- a unique index on
+       -- (mapping_type, email_address, lower(label)) would be reported as one
+       -- on (mapping_type, email_address) and block the migration. Failing
+       -- safe in the other direction is the wrong trade for an assertion.
+       AND (SELECT array_agg(coalesce(a.attname::TEXT, '(expression)')
+                             ORDER BY coalesce(a.attname::TEXT, '(expression)'))
               FROM unnest(i.indkey[0:i.indnkeyatts - 1]) AS k(attnum)
-              JOIN pg_attribute a
+              LEFT JOIN pg_attribute a
                 ON a.attrelid = i.indrelid AND a.attnum = k.attnum)
            = ARRAY['email_address', 'mapping_type']
      LIMIT 1;
