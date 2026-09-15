@@ -76,70 +76,45 @@ BEGIN;
 -- Run it like this, once the gateway is serving cortex-utils >= 01bf644:
 --
 --   psql -v ON_ERROR_STOP=1 \
---        -c "SET cortex.code_deployed = 'yes'" \
+--        -c "CREATE TEMP TABLE cortex_code_deployed ()" \
 --        -f migrations/004_fix_email_mapping_conflict_arbiter.sql
 --
--- A SET in a session is normally transient. It is NOT guaranteed to be:
---     ALTER DATABASE cortex SET cortex.code_deployed = 'yes';
---     ALTER ROLE cortex     SET cortex.code_deployed = 'yes';
--- either of which persists the value for every future session, with no
--- expiry and nothing in this file to notice -- permanently defeating the
--- gate. So the gate also refuses when the value arrives from one of those
--- persistent sources, and only accepts a value set for this session.
+-- WHY A TEMP TABLE AND NOT A GUC
+--
+-- The gate needs proof that a human decided to run this *now*, in this
+-- session. Three review rounds found three different ways to make a custom
+-- GUC permanent, each of which defeats the gate for every future session
+-- while leaving it looking like it works:
+--
+--   1. ALTER DATABASE cortex SET cortex.code_deployed = 'yes';
+--   2. ALTER ROLE cortex     SET cortex.code_deployed = 'yes';
+--   3. ALTER ROLE ALL        SET cortex.code_deployed = 'yes';
+--        -- writes setdatabase = 0 AND setrole = 0, matching neither branch
+--           of a naive pg_db_role_setting query
+--   4. postgresql.conf + pg_reload_conf()
+--        -- cluster-wide, and writes NO row to pg_db_role_setting at all,
+--           so no catalog query over that table can see it
+--
+-- Widening the query does not converge. (4) is invisible to it; ALTER SYSTEM
+-- is rejected for a custom GUC; and a placeholder GUC does not appear in
+-- pg_settings, so `source = 'session'` is not available either. Each round
+-- closed one hole and the next round found another.
+--
+-- A temp table has no such ladder. It lives in a schema private to one
+-- backend, is destroyed when that backend disconnects, and there is no
+-- configuration mechanism -- file, catalog, role, database or cluster -- that
+-- can create one. Its existence is therefore proof of exactly the thing the
+-- gate is asking about, rather than a proxy for it. Eight lines instead of
+-- fifty-six, and nothing left to widen.
 DO $$
-DECLARE
-    persisted TEXT;
-    persisted_scope TEXT;
 BEGIN
-    -- Match ANY persisted cortex.code_deployed, at any scope.
-    --
-    -- The previous version compared setdatabase/setrole against real oids,
-    -- which silently missed the cluster-wide form:
-    --     ALTER ROLE ALL SET cortex.code_deployed = 'yes';
-    -- writes setdatabase = 0 AND setrole = 0, matching neither branch. A
-    -- reviewer demonstrated the migration running to completion with only
-    -- that in place and no session SET at all -- the gate bypassed by the
-    -- exact mechanism it was added to block, one flavour of persistence
-    -- later.
-    --
-    -- So scope is no longer part of the test. Any persisted value is
-    -- evidence that someone tried to make this permanent, and over-matching
-    -- costs an operator one RESET while under-matching costs a production
-    -- incident. We have already had two.
-    SELECT s.setting,
-           CASE
-               WHEN r.setdatabase = 0 AND r.setrole = 0 THEN 'ALL ROLES, ALL DATABASES'
-               WHEN r.setdatabase = 0 THEN 'role ' || coalesce(rol.rolname, r.setrole::TEXT)
-               WHEN r.setrole = 0 THEN 'database ' || coalesce(db.datname, r.setdatabase::TEXT)
-               ELSE 'role ' || coalesce(rol.rolname, r.setrole::TEXT)
-                    || ' in database ' || coalesce(db.datname, r.setdatabase::TEXT)
-           END
-    INTO persisted, persisted_scope
-    FROM pg_db_role_setting r
-    CROSS JOIN LATERAL unnest(r.setconfig) AS s(setting)
-    LEFT JOIN pg_database db ON db.oid = r.setdatabase
-    LEFT JOIN pg_roles rol ON rol.oid = r.setrole
-    WHERE s.setting LIKE 'cortex.code_deployed=%'
-    LIMIT 1;
-
-    IF persisted IS NOT NULL THEN
-        RAISE EXCEPTION
-            'cortex.code_deployed is persisted for % (%): that defeats this gate '
-            'for every future session. RESET it at that scope -- e.g. '
-            'ALTER ROLE ALL RESET cortex.code_deployed; / '
-            'ALTER DATABASE % RESET cortex.code_deployed; / '
-            'ALTER ROLE % RESET cortex.code_deployed; -- then SET it '
-            'per-session when you actually mean to run this.',
-            persisted_scope, persisted, current_database(), current_user;
-    END IF;
-
-    IF coalesce(current_setting('cortex.code_deployed', TRUE), '') <> 'yes' THEN
+    IF to_regclass('pg_temp.cortex_code_deployed') IS NULL THEN
         RAISE EXCEPTION
             'refusing to run: this migration drops the constraint older '
             'cortex-utils names in ON CONFLICT ON CONSTRAINT unique_email_mapping. '
             'Deploy the gateway with cortex-utils >= 01bf644 first, confirm '
-            'PUT /config succeeds, then re-run with: '
-            'SET cortex.code_deployed = ''yes'';';
+            'PUT /config succeeds, then re-run in a session that has done: '
+            'CREATE TEMP TABLE cortex_code_deployed ();';
     END IF;
 END $$;
 
@@ -170,6 +145,7 @@ DO $$
 DECLARE
     arbiter_ok BOOLEAN;
     arbiter_cols TEXT[];
+    offender TEXT;
 BEGIN
     SELECT EXISTS (
         SELECT 1
@@ -214,6 +190,41 @@ BEGIN
           AND conname = 'unique_email_mapping'
     ) THEN
         RAISE EXCEPTION 'unique_email_mapping still present after drop';
+    END IF;
+
+    -- Check by SHAPE, not just by name. Step 1 drops two forms -- the named
+    -- constraint and a bare index of the same name -- but the check above
+    -- only looks at pg_constraint. An unqualified DROP INDEX IF EXISTS
+    -- no-ops on an index outside search_path, which would let this commit
+    -- with an UNCONDITIONAL unique object still live on these columns: the
+    -- exact semantic bug the header describes, passing under a different
+    -- name. Uniqueness here must hold over live rows only, so that a
+    -- soft-deleted mapping can be recreated.
+    -- One query, so the name in the message is necessarily the index that
+    -- tripped the check. An EXISTS plus a separate lookup for the message
+    -- drifted apart on the first attempt: the lookup omitted the column
+    -- filter and reported triage_email_mappings_pkey -- unique and
+    -- unconditional, but on (id), and not what matched. An error that names
+    -- the primary key invites an operator to drop the primary key.
+    SELECT i.indexrelid::regclass::TEXT
+      INTO offender
+      FROM pg_index i
+     WHERE i.indrelid = 'triage_email_mappings'::regclass
+       AND i.indisunique
+       AND i.indpred IS NULL                    -- unconditional
+       AND (SELECT array_agg(a.attname::TEXT ORDER BY a.attname)
+              FROM unnest(i.indkey[0:i.indnkeyatts - 1]) AS k(attnum)
+              JOIN pg_attribute a
+                ON a.attrelid = i.indrelid AND a.attnum = k.attnum)
+           = ARRAY['email_address', 'mapping_type']
+     LIMIT 1;
+
+    IF offender IS NOT NULL THEN
+        RAISE EXCEPTION
+            'an UNCONDITIONAL unique index on (mapping_type, email_address) '
+            'survives (index %). It blocks recreating a soft-deleted mapping '
+            'and shadows the partial arbiter. Drop it, qualifying the schema.',
+            offender;
     END IF;
 
     RAISE NOTICE 'OK: partial unique index on % is the sole upsert arbiter', arbiter_cols;
