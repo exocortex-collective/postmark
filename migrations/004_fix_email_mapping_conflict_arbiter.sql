@@ -79,11 +79,32 @@ BEGIN;
 --        -c "SET cortex.code_deployed = 'yes'" \
 --        -f migrations/004_fix_email_mapping_conflict_arbiter.sql
 --
--- The setting is session-scoped, so it cannot be left on by accident, and an
--- automated migrate step that does not know about it fails closed rather
--- than silently killing config imports.
+-- A SET in a session is normally transient. It is NOT guaranteed to be:
+--     ALTER DATABASE cortex SET cortex.code_deployed = 'yes';
+--     ALTER ROLE cortex     SET cortex.code_deployed = 'yes';
+-- either of which persists the value for every future session, with no
+-- expiry and nothing in this file to notice -- permanently defeating the
+-- gate. So the gate also refuses when the value arrives from one of those
+-- persistent sources, and only accepts a value set for this session.
 DO $$
+DECLARE persisted TEXT;
 BEGIN
+    SELECT s.setting INTO persisted
+    FROM pg_db_role_setting r
+    CROSS JOIN LATERAL unnest(r.setconfig) AS s(setting)
+    WHERE (r.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+           OR r.setrole = (SELECT oid FROM pg_roles WHERE rolname = current_user))
+      AND s.setting LIKE 'cortex.code_deployed=%';
+
+    IF persisted IS NOT NULL THEN
+        RAISE EXCEPTION
+            'cortex.code_deployed is persisted at the database or role level (%): '
+            'that defeats this gate for every future session. Remove it with '
+            'ALTER DATABASE % RESET cortex.code_deployed; (and/or ALTER ROLE % RESET ...), '
+            'then set it per-session when you actually mean to run this.',
+            persisted, current_database(), current_user;
+    END IF;
+
     IF coalesce(current_setting('cortex.code_deployed', TRUE), '') <> 'yes' THEN
         RAISE EXCEPTION
             'refusing to run: this migration drops the constraint older '
@@ -138,11 +159,18 @@ BEGIN
             'idx_email_mappings_active missing/invalid: import_yaml_to_db upsert will fail';
     END IF;
 
-    SELECT array_agg(a.attname ORDER BY k.ord)
+    -- Slice to indnkeyatts: INCLUDE columns sit in indkey after the key
+    -- columns but play no part in ON CONFLICT inference, so folding them
+    -- into this comparison would false-fail on an index that is actually
+    -- fine. LEFT JOIN because an expression column has attnum 0 and no
+    -- pg_attribute row -- an INNER JOIN silently drops it and reports a
+    -- truncated column list, which fails safe but misleadingly.
+    SELECT array_agg(coalesce(a.attname, '(expression)') ORDER BY k.ord)
     INTO arbiter_cols
     FROM pg_index i
-    JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE
-    JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+    JOIN LATERAL unnest(i.indkey[0:i.indnkeyatts - 1]) WITH ORDINALITY AS k(attnum, ord)
+         ON TRUE
+    LEFT JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
     WHERE i.indexrelid = 'idx_email_mappings_active'::regclass;
 
     IF arbiter_cols IS DISTINCT FROM ARRAY['mapping_type', 'email_address']::TEXT[] THEN
