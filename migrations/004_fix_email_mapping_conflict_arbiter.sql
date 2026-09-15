@@ -66,6 +66,34 @@
 
 BEGIN;
 
+-- 0. ORDERING GATE.
+--
+-- A comment is not a control. The warning above was written by the same
+-- person who then ran this ahead of the deploy twice on 2026-09-14/15,
+-- breaking PUT /config both times and restoring the constraint by hand.
+-- So the ordering is now enforced, not merely documented.
+--
+-- Run it like this, once the gateway is serving cortex-utils >= 01bf644:
+--
+--   psql -v ON_ERROR_STOP=1 \
+--        -c "SET cortex.code_deployed = 'yes'" \
+--        -f migrations/004_fix_email_mapping_conflict_arbiter.sql
+--
+-- The setting is session-scoped, so it cannot be left on by accident, and an
+-- automated migrate step that does not know about it fails closed rather
+-- than silently killing config imports.
+DO $$
+BEGIN
+    IF coalesce(current_setting('cortex.code_deployed', TRUE), '') <> 'yes' THEN
+        RAISE EXCEPTION
+            'refusing to run: this migration drops the constraint older '
+            'cortex-utils names in ON CONFLICT ON CONSTRAINT unique_email_mapping. '
+            'Deploy the gateway with cortex-utils >= 01bf644 first, confirm '
+            'PUT /config succeeds, then re-run with: '
+            'SET cortex.code_deployed = ''yes'';';
+    END IF;
+END $$;
+
 -- 1. Drop the stray unconditional constraint if present (production only).
 ALTER TABLE triage_email_mappings
     DROP CONSTRAINT IF EXISTS unique_email_mapping;
@@ -80,8 +108,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_email_mappings_active
     WHERE deleted_at IS NULL;
 
 -- 3. Verify the upsert arbiter is now inferable, and fail loudly if not.
+--
+-- The COLUMN LIST check is not redundant with the name check. CREATE UNIQUE
+-- INDEX IF NOT EXISTS at step 2 no-ops on a pre-existing index of the same
+-- name, so an index that is unique, valid and correctly predicated but built
+-- on the WRONG columns (say email_address alone) would pass every other
+-- assertion here while Postgres still refused to infer
+-- `ON CONFLICT (mapping_type, email_address) WHERE deleted_at IS NULL` at
+-- runtime -- the failure this migration exists to prevent, reported as
+-- "no unique or exclusion constraint matching the ON CONFLICT specification".
 DO $$
-DECLARE arbiter_ok BOOLEAN;
+DECLARE
+    arbiter_ok BOOLEAN;
+    arbiter_cols TEXT[];
 BEGIN
     SELECT EXISTS (
         SELECT 1
@@ -99,6 +138,20 @@ BEGIN
             'idx_email_mappings_active missing/invalid: import_yaml_to_db upsert will fail';
     END IF;
 
+    SELECT array_agg(a.attname ORDER BY k.ord)
+    INTO arbiter_cols
+    FROM pg_index i
+    JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE
+    JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+    WHERE i.indexrelid = 'idx_email_mappings_active'::regclass;
+
+    IF arbiter_cols IS DISTINCT FROM ARRAY['mapping_type', 'email_address']::TEXT[] THEN
+        RAISE EXCEPTION
+            'idx_email_mappings_active is on columns %, expected (mapping_type, email_address): '
+            'ON CONFLICT inference will fail at runtime',
+            arbiter_cols;
+    END IF;
+
     IF EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conrelid = 'triage_email_mappings'::regclass
@@ -107,7 +160,7 @@ BEGIN
         RAISE EXCEPTION 'unique_email_mapping still present after drop';
     END IF;
 
-    RAISE NOTICE 'OK: partial unique index is the sole upsert arbiter';
+    RAISE NOTICE 'OK: partial unique index on % is the sole upsert arbiter', arbiter_cols;
 END $$;
 
 COMMIT;
