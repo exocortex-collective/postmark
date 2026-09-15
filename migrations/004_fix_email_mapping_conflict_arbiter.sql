@@ -87,22 +87,50 @@ BEGIN;
 -- gate. So the gate also refuses when the value arrives from one of those
 -- persistent sources, and only accepts a value set for this session.
 DO $$
-DECLARE persisted TEXT;
+DECLARE
+    persisted TEXT;
+    persisted_scope TEXT;
 BEGIN
-    SELECT s.setting INTO persisted
+    -- Match ANY persisted cortex.code_deployed, at any scope.
+    --
+    -- The previous version compared setdatabase/setrole against real oids,
+    -- which silently missed the cluster-wide form:
+    --     ALTER ROLE ALL SET cortex.code_deployed = 'yes';
+    -- writes setdatabase = 0 AND setrole = 0, matching neither branch. A
+    -- reviewer demonstrated the migration running to completion with only
+    -- that in place and no session SET at all -- the gate bypassed by the
+    -- exact mechanism it was added to block, one flavour of persistence
+    -- later.
+    --
+    -- So scope is no longer part of the test. Any persisted value is
+    -- evidence that someone tried to make this permanent, and over-matching
+    -- costs an operator one RESET while under-matching costs a production
+    -- incident. We have already had two.
+    SELECT s.setting,
+           CASE
+               WHEN r.setdatabase = 0 AND r.setrole = 0 THEN 'ALL ROLES, ALL DATABASES'
+               WHEN r.setdatabase = 0 THEN 'role ' || coalesce(rol.rolname, r.setrole::TEXT)
+               WHEN r.setrole = 0 THEN 'database ' || coalesce(db.datname, r.setdatabase::TEXT)
+               ELSE 'role ' || coalesce(rol.rolname, r.setrole::TEXT)
+                    || ' in database ' || coalesce(db.datname, r.setdatabase::TEXT)
+           END
+    INTO persisted, persisted_scope
     FROM pg_db_role_setting r
     CROSS JOIN LATERAL unnest(r.setconfig) AS s(setting)
-    WHERE (r.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
-           OR r.setrole = (SELECT oid FROM pg_roles WHERE rolname = current_user))
-      AND s.setting LIKE 'cortex.code_deployed=%';
+    LEFT JOIN pg_database db ON db.oid = r.setdatabase
+    LEFT JOIN pg_roles rol ON rol.oid = r.setrole
+    WHERE s.setting LIKE 'cortex.code_deployed=%'
+    LIMIT 1;
 
     IF persisted IS NOT NULL THEN
         RAISE EXCEPTION
-            'cortex.code_deployed is persisted at the database or role level (%): '
-            'that defeats this gate for every future session. Remove it with '
-            'ALTER DATABASE % RESET cortex.code_deployed; (and/or ALTER ROLE % RESET ...), '
-            'then set it per-session when you actually mean to run this.',
-            persisted, current_database(), current_user;
+            'cortex.code_deployed is persisted for % (%): that defeats this gate '
+            'for every future session. RESET it at that scope -- e.g. '
+            'ALTER ROLE ALL RESET cortex.code_deployed; / '
+            'ALTER DATABASE % RESET cortex.code_deployed; / '
+            'ALTER ROLE % RESET cortex.code_deployed; -- then SET it '
+            'per-session when you actually mean to run this.',
+            persisted_scope, persisted, current_database(), current_user;
     END IF;
 
     IF coalesce(current_setting('cortex.code_deployed', TRUE), '') <> 'yes' THEN
