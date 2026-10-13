@@ -230,3 +230,68 @@ def test_find_attachment_in_parts_no_parts(worker: AttachmentWorker) -> None:
     result = worker._find_attachment_in_parts(payload, "target123")
 
     assert result is None
+
+
+class _Exec:
+    def __init__(self, value):
+        self.value = value
+
+    def execute(self):
+        return self.value
+
+
+class _FakeGmail:
+    """users().messages().attachments().get(...).execute(), and nothing else:
+    the real attachments resource has no get_media."""
+
+    def __init__(self, data: bytes):
+        import base64
+
+        self.encoded = base64.urlsafe_b64encode(data).decode().rstrip("=")
+        self.gets: list[dict] = []
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self
+
+    def attachments(self):
+        return self
+
+    def get(self, **kwargs):
+        self.gets.append(kwargs)
+        return _Exec({"data": self.encoded, "size": 0})
+
+
+class _FakeS3:
+    def __init__(self):
+        self.puts: list[dict] = []
+
+    def put_object(self, **kwargs):
+        self.puts.append(kwargs)
+
+
+@pytest.mark.parametrize("size", [1024, 15 * 1024 * 1024])
+def test_attachment_of_any_size_is_fetched_inline_and_stored(
+    worker: AttachmentWorker, size: int
+) -> None:
+    from types import SimpleNamespace
+
+    data = b"x" * size
+    gmail, s3 = _FakeGmail(data), _FakeS3()
+    worker.config = SimpleNamespace(s3_bucket="bucket")
+    worker._get_gmail_service = lambda: gmail  # type: ignore[method-assign]
+    worker._get_s3_client = lambda: s3  # type: ignore[method-assign]
+    worker._get_attachment_metadata = lambda g, a: {  # type: ignore[method-assign]
+        "filename": "big.pdf",
+        "mime_type": "application/pdf",
+        "size": size,
+    }
+
+    result = worker._process_single_attachment("g1", "att1")
+
+    assert result == ("att1", "big.pdf", "application/pdf", size)
+    assert gmail.gets == [{"userId": "me", "messageId": "g1", "id": "att1"}]
+    assert len(s3.puts) == 1 and s3.puts[0]["Body"] == data
+    assert s3.puts[0]["Key"].endswith("/big.pdf")
