@@ -9,7 +9,7 @@ on:
         default: 'latest'
 
 env:
-  IMAGE_NAME: us-central1-docker.pkg.dev/cortex-gmail/cortex/postmark
+  IMAGE_NAME: ghcr.io/exocortex-collective/postmark
 
 jobs:
   deploy:
