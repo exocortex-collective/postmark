@@ -351,6 +351,7 @@ class AttachmentWorker:
         # Gmail API returns base64url without padding - add correct padding
         raw_data = att_response["data"]
         data = base64.urlsafe_b64decode(raw_data + "=" * (-len(raw_data) % 4))
+        del att_response, raw_data  # ~33MB of base64 at Gmail's 25MB cap
 
         self._upload_small_file(s3_key, data, mime_type)
         return len(data)

@@ -295,3 +295,27 @@ def test_attachment_of_any_size_is_fetched_inline_and_stored(
     assert gmail.gets == [{"userId": "me", "messageId": "g1", "id": "att1"}]
     assert len(s3.puts) == 1 and s3.puts[0]["Body"] == data
     assert s3.puts[0]["Key"].endswith("/big.pdf")
+    assert s3.puts[0]["ContentType"] == "application/pdf"
+
+
+def test_the_stored_size_is_the_bytes_gmail_returned_not_its_metadata(
+    worker: AttachmentWorker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    import postmark.services.attachment_worker as aw
+
+    warnings: list[str] = []
+    monkeypatch.setattr(aw.logger, "warning", lambda msg, **kw: warnings.append(msg))
+    data = b"y" * 100
+    worker.config = SimpleNamespace(s3_bucket="bucket")
+    worker._get_gmail_service = lambda: _FakeGmail(data)  # type: ignore[method-assign]
+    worker._get_s3_client = lambda: _FakeS3()  # type: ignore[method-assign]
+    worker._get_attachment_metadata = lambda g, a: {  # type: ignore[method-assign]
+        "filename": "f.bin",
+        "mime_type": "application/octet-stream",
+        "size": 999,
+    }
+
+    assert worker._process_single_attachment("g1", "att1")[3] == 100
+    assert warnings == ["Attachment size mismatch"]
