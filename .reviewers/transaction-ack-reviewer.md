@@ -17,6 +17,6 @@ verification: mixed
 
 **Do not flag:**
 - Read-only queries outside a transaction.
-- The deliberate ack of non-retryable Gmail errors (404/400/403) at gmail_sync.py ~1316 when nothing was written.
+- Deliberate acks: non-retryable Gmail errors in `_process_notification_with_retry`, and the first-notification baseline and history-404 reset acks in `_process_notification_inner`.
 - Generic exception hygiene (error-handling-reviewer).
 - Connection closing (resource-leak-reviewer).
