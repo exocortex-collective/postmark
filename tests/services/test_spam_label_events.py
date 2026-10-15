@@ -40,7 +40,7 @@ class FakeConn:
         elif "'SPAM' = ANY(label_ids)" in sql:
             self._row = (self.spam,)
         else:
-            self._row = None  # the label_ids UPDATE
+            self._row = None
 
     def fetchone(self) -> tuple | None:
         return self._row
@@ -79,9 +79,7 @@ def make_sync(conn: FakeConn) -> GmailSync:
 def test_moved_into_spam_enqueues_labeling(enqueued) -> None:
     conn = FakeConn()
     make_sync(conn)._process_label_event("g1", ["SPAM"], "added")
-    assert enqueued == [
-        ("labeling", {"gmail_id": "g1"}, {"dedup_key": "gmail_id", "commit": False})
-    ]
+    assert enqueued == [("labeling", {"gmail_id": "g1"}, {"commit": False})]
     assert conn.committed
 
 

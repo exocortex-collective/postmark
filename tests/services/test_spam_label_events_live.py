@@ -16,13 +16,11 @@ from contextlib import contextmanager
 from typing import Any
 from unittest.mock import MagicMock
 
+import psycopg2
 import pytest
+from cortex_utils.queue.schema import queue_ddl
 
-psycopg2 = pytest.importorskip("psycopg2")
-
-from cortex_utils.queue.schema import queue_ddl  # noqa: E402
-
-from postmark.services.gmail_sync import GmailSync  # noqa: E402
+from postmark.services.gmail_sync import GmailSync
 
 DSN = os.environ.get("CORTEX_TEST_DSN")
 
@@ -88,12 +86,33 @@ def _labels(conn: Any, gmail_id: str) -> list[str]:
         return sorted(cur.fetchone()[0])
 
 
-def test_into_spam_records_label_and_enqueues_one_labeling_job(conn: Any) -> None:
-    sync = _sync(conn)
-    sync._process_label_event("inbox", ["SPAM"], "added")
-    sync._process_label_event("inbox", ["SPAM"], "added")  # Gmail redelivers
-    assert _labels(conn, "inbox") == ["INBOX", "SPAM"]
+def test_into_spam_records_labels_and_enqueues_labeling(conn: Any) -> None:
+    _sync(conn)._process_label_event("inbox", ["SPAM", "UNREAD"], "added")
+    assert _labels(conn, "inbox") == ["INBOX", "SPAM", "UNREAD"]
     assert _jobs(conn) == [("labeling", "inbox")]
+
+
+def test_a_job_already_processing_does_not_swallow_the_transition(conn: Any) -> None:
+    # That job may have read the labels from before SPAM was added.
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO queue (queue_name, payload, status)"
+            " VALUES ('labeling', '{\"gmail_id\": \"inbox\"}', 'processing')"
+        )
+    conn.commit()
+    _sync(conn)._process_label_event("inbox", ["SPAM"], "added")
+    assert _jobs(conn) == [("labeling", "inbox"), ("labeling", "inbox")]
+
+
+def test_a_failed_label_event_rolls_back_its_job(conn: Any) -> None:
+    sync = _sync(conn)
+    sync._detect_learning_opportunities = MagicMock(  # type: ignore[method-assign]
+        side_effect=psycopg2.OperationalError("boom")
+    )
+    with pytest.raises(psycopg2.OperationalError):
+        sync._process_label_event("inbox", ["SPAM"], "added")
+    assert _labels(conn, "inbox") == ["INBOX"]
+    assert _jobs(conn) == []
 
 
 def test_out_of_spam_enqueues_triage(conn: Any) -> None:

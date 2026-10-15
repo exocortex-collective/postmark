@@ -51,7 +51,5 @@ jobs:
         run: |
           uv run pytest --maxfail=1 --disable-warnings -q
 
-      # pytest exits 0 when every test skips; -p no:skipping turns a skip into
-      # an error, so a broken service fails here instead of passing silently.
       - name: Fail if the live-Postgres tests were skipped
-        run: uv run pytest tests/services/test_spam_label_events_live.py -q -p no:cacheprovider -p no:skipping
+        run: uv run pytest tests/services/test_spam_label_events_live.py -q -p no:skipping

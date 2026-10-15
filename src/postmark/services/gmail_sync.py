@@ -1252,7 +1252,9 @@ class GmailSync:
                 if cur.fetchone() is None:
                     return
             queue = "triage"
-        enqueue(conn, queue, {"gmail_id": gmail_id}, dedup_key="gmail_id", commit=False)
+        # No dedup_key: enqueue's dedup counts a job already *processing* as
+        # cover, and that job may have read the labels from before this change.
+        enqueue(conn, queue, {"gmail_id": gmail_id}, commit=False)
 
     def _is_spam(self, conn: psycopg2.extensions.connection, gmail_id: str) -> bool:
         """Whether the message currently carries Gmail's SPAM label."""
