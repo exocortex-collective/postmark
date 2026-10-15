@@ -1,8 +1,4 @@
-"""Gmail moving mail in and out of SPAM (cortex-kvyn).
-
-Driven through _process_label_event and _detect_learning_opportunities; only
-the database connection and the cortex-utils enqueue are faked.
-"""
+"""Gmail moving mail in and out of SPAM (cortex-kvyn)."""
 
 from __future__ import annotations
 

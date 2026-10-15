@@ -93,7 +93,6 @@ def test_into_spam_records_labels_and_enqueues_labeling(conn: Any) -> None:
 
 
 def test_a_job_already_processing_does_not_swallow_the_transition(conn: Any) -> None:
-    # That job may have read the labels from before SPAM was added.
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO queue (queue_name, payload, status)"
