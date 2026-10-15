@@ -32,7 +32,7 @@ from cortex_utils.metrics import (
     QUEUE_PROCESSED,
     start_metrics_server,
 )
-from cortex_utils.queue import ensure_queue_schema
+from cortex_utils.queue import enqueue, ensure_queue_schema
 from google.cloud import pubsub_v1
 from google.cloud.pubsub_v1.types import FlowControl
 from google.oauth2.credentials import Credentials
@@ -1125,6 +1125,9 @@ class GmailSync:
                             (label_ids, gmail_id),
                         )
 
+                    if "SPAM" in label_ids:
+                        self._enqueue_for_spam_change(conn, gmail_id, event_type)
+
                     # Bulk insert all actions
                     if actions_to_enqueue:
                         execute_values(
@@ -1184,6 +1187,9 @@ class GmailSync:
         if not changed:
             return  # only non-managed labels changed — not a teaching signal
 
+        if self._is_spam(conn, gmail_id):
+            return  # labels on spam are stripped by machine, not taught (cortex-kvyn)
+
         expected = expected_cortex_labels(conn, gmail_id, prefix=prefix)
         if expected is None:
             return  # not triaged yet -> noise
@@ -1225,6 +1231,38 @@ class GmailSync:
                     f"Learning opportunity: {event_type} {name} on {gmail_id} "
                     f"(sender={sender}) diverges from classification"
                 )
+
+    def _enqueue_for_spam_change(
+        self, conn: psycopg2.extensions.connection, gmail_id: str, event_type: str
+    ) -> None:
+        """Keep spam out of the pipeline as Gmail moves mail in and out of it.
+
+        Into SPAM: a labeling job, which reconciles the message to no Cortex
+        labels. Out of SPAM: a triage job, if the message is parsed -- an
+        unparsed one is enqueued for triage by the parse worker (cortex-kvyn).
+        Runs in the label event's transaction, so it commits with label_ids.
+        """
+        if event_type == "added":
+            queue = "labeling"
+        else:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM emails_parsed WHERE gmail_id = %s", (gmail_id,)
+                )
+                if cur.fetchone() is None:
+                    return
+            queue = "triage"
+        enqueue(conn, queue, {"gmail_id": gmail_id}, dedup_key="gmail_id", commit=False)
+
+    def _is_spam(self, conn: psycopg2.extensions.connection, gmail_id: str) -> bool:
+        """Whether the message currently carries Gmail's SPAM label."""
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 'SPAM' = ANY(label_ids) FROM emails_raw WHERE gmail_id = %s",
+                (gmail_id,),
+            )
+            row = cur.fetchone()
+        return bool(row) and row[0] is True
 
     def _get_sender_addr(
         self, conn: psycopg2.extensions.connection, gmail_id: str
