@@ -176,7 +176,8 @@ From archived code, still in use:
 
 ## GitHub Integrations
 
-- **Gemini Code Assist**: Automatic code review on PRs
+- **Gemini Code Assist**: installed but DISABLED via `.reviewers/config.json`
+  `bots.gemini`
 - **Renovate**: Automated dependency updates
 
 ## Code Review Workflow
