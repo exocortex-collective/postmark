@@ -4,7 +4,6 @@
 import argparse
 import base64
 import hashlib
-import io
 import json
 import os
 import signal
@@ -34,7 +33,6 @@ from cortex_utils.queue import (
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaIoBaseDownload
 
 from postmark.reliability import GracefulShutdown
 
@@ -43,16 +41,6 @@ logger = get_logger(__name__)
 # How long a job can be in 'processing' before it's considered stale
 # and reset to 'pending' (visibility timeout)
 VISIBILITY_TIMEOUT_MINUTES = 5
-
-# S3 multipart upload threshold (use multipart for files > 10MB)
-# AWS best practice is 10MB, reduces memory usage for large files
-MULTIPART_THRESHOLD_BYTES = 10 * 1024 * 1024  # 10MB
-
-# Download chunk size for streaming (1MB chunks)
-DOWNLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB
-
-# S3 multipart upload part size (5MB minimum per AWS requirements)
-MULTIPART_PART_SIZE = 5 * 1024 * 1024  # 5MB
 
 
 @dataclass
@@ -343,10 +331,10 @@ class AttachmentWorker:
             ContentType=mime_type,
         )
 
-    def _upload_small_file_direct(
+    def _upload_direct(
         self, s3_key: str, gmail_id: str, attachment_id: str, mime_type: str
     ) -> int:
-        """Fetch and upload small file directly (non-streaming).
+        """Fetch an attachment from Gmail and upload it to S3.
 
         Returns the actual bytes uploaded.
         """
@@ -363,120 +351,10 @@ class AttachmentWorker:
         # Gmail API returns base64url without padding - add correct padding
         raw_data = att_response["data"]
         data = base64.urlsafe_b64decode(raw_data + "=" * (-len(raw_data) % 4))
+        del att_response, raw_data  # ~33MB of base64 at Gmail's 25MB cap
 
         self._upload_small_file(s3_key, data, mime_type)
         return len(data)
-
-    def _upload_large_file_streaming(
-        self, s3_key: str, gmail_id: str, attachment_id: str, mime_type: str
-    ) -> int:
-        """Stream large file from Gmail to S3 using multipart upload.
-
-        Returns the total bytes uploaded.
-        """
-        s3 = self._get_s3_client()
-        gmail = self._get_gmail_service()
-
-        upload_id = None
-        try:
-            # Initiate multipart upload
-            multipart = s3.create_multipart_upload(
-                Bucket=self.config.s3_bucket,
-                Key=s3_key,
-                ContentType=mime_type,
-            )
-            upload_id = multipart["UploadId"]
-
-            # Get attachment as media request for streaming
-            request = (
-                gmail.users()
-                .messages()
-                .attachments()
-                .get_media(userId="me", messageId=gmail_id, id=attachment_id)
-            )
-
-            # Stream download in chunks using context managers for proper cleanup
-            with io.BytesIO() as buffer:
-                downloader = MediaIoBaseDownload(
-                    buffer, request, chunksize=DOWNLOAD_CHUNK_SIZE
-                )
-
-                parts = []
-                part_number = 1
-                total_bytes = 0
-                with io.BytesIO() as part_buffer:
-                    done = False
-                    while not done:
-                        _, done = downloader.next_chunk()
-
-                        # Read downloaded chunk from buffer
-                        buffer.seek(0)
-                        chunk_data = buffer.read()
-                        buffer.seek(0)
-                        buffer.truncate(0)
-
-                        # Accumulate chunks into parts for multipart upload
-                        part_buffer.write(chunk_data)
-                        total_bytes += len(chunk_data)
-
-                        # Upload when we have enough data or this is the last chunk
-                        if part_buffer.tell() >= MULTIPART_PART_SIZE or done:
-                            if part_buffer.tell() > 0:
-                                # Pass BytesIO directly to avoid memory copy from getvalue()
-                                part_buffer.seek(0)
-                                response = s3.upload_part(
-                                    Bucket=self.config.s3_bucket,
-                                    Key=s3_key,
-                                    PartNumber=part_number,
-                                    UploadId=upload_id,
-                                    Body=part_buffer,
-                                )
-                                parts.append(
-                                    {
-                                        "PartNumber": part_number,
-                                        "ETag": response["ETag"],
-                                    }
-                                )
-                                part_number += 1
-
-                            # Reset part buffer for next part, avoiding reallocation
-                            part_buffer.seek(0)
-                            part_buffer.truncate(0)
-
-                    # Complete multipart upload
-                    s3.complete_multipart_upload(
-                        Bucket=self.config.s3_bucket,
-                        Key=s3_key,
-                        UploadId=upload_id,
-                        MultipartUpload={"Parts": parts},
-                    )
-
-            return total_bytes
-
-        except Exception as e:
-            # Abort multipart upload on error to prevent orphaned parts
-            if upload_id:
-                logger.warning(
-                    "Aborting multipart upload due to error",
-                    s3_key=s3_key,
-                    upload_id=upload_id,
-                    error=str(e),
-                )
-                try:
-                    s3.abort_multipart_upload(
-                        Bucket=self.config.s3_bucket,
-                        Key=s3_key,
-                        UploadId=upload_id,
-                    )
-                except Exception as abort_exc:
-                    logger.error(
-                        "Failed to abort multipart upload - orphaned parts may remain",
-                        s3_key=s3_key,
-                        upload_id=upload_id,
-                        abort_error=str(abort_exc),
-                    )
-            # Always re-raise the original exception
-            raise
 
     def _process_single_attachment(
         self, gmail_id: str, attachment_id: str
@@ -497,50 +375,26 @@ class AttachmentWorker:
         att_id_hash = hashlib.sha256(attachment_id.encode()).hexdigest()
         s3_key = f"attachments/{gmail_id}/{att_id_hash}/{filename}"
 
-        # Choose upload strategy based on size
+        # One fetch for every size: Gmail returns attachments inline (base64,
+        # about 25MB at most); the attachments resource has no get_media.
         size_bytes = metadata["size"]
-        if size_bytes < MULTIPART_THRESHOLD_BYTES:
-            actual_size = self._upload_small_file_direct(
-                s3_key, gmail_id, attachment_id, metadata["mime_type"]
-            )
-            if actual_size != size_bytes:
-                logger.warning(
-                    "Attachment size mismatch for small file",
-                    s3_key=s3_key,
-                    expected_size=size_bytes,
-                    actual_size=actual_size,
-                    gmail_id=gmail_id,
-                )
-            logger.info(
-                "Stored small attachment",
+        actual_size = self._upload_direct(
+            s3_key, gmail_id, attachment_id, metadata["mime_type"]
+        )
+        if actual_size != size_bytes:
+            logger.warning(
+                "Attachment size mismatch",
                 s3_key=s3_key,
-                size_bytes=actual_size,
+                expected_size=size_bytes,
+                actual_size=actual_size,
                 gmail_id=gmail_id,
             )
-        else:
-            logger.info(
-                "Streaming large attachment",
-                s3_key=s3_key,
-                size_bytes=size_bytes,
-                gmail_id=gmail_id,
-            )
-            actual_size = self._upload_large_file_streaming(
-                s3_key, gmail_id, attachment_id, metadata["mime_type"]
-            )
-            if actual_size != size_bytes:
-                logger.warning(
-                    "Attachment size mismatch for large file",
-                    s3_key=s3_key,
-                    expected_size=size_bytes,
-                    actual_size=actual_size,
-                    gmail_id=gmail_id,
-                )
-            logger.info(
-                "Stored large attachment",
-                s3_key=s3_key,
-                size_bytes=actual_size,
-                gmail_id=gmail_id,
-            )
+        logger.info(
+            "Stored attachment",
+            s3_key=s3_key,
+            size_bytes=actual_size,
+            gmail_id=gmail_id,
+        )
 
         return attachment_id, filename, metadata["mime_type"], actual_size
 
