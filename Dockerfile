@@ -22,4 +22,4 @@ VOLUME /app/secrets
 VOLUME /app/data
 
 # Run the gmail-sync service
-CMD ["uv", "run", "python", "-m", "postmark.services.gmail_sync"]
+CMD ["/app/.venv/bin/python", "-m", "postmark.services.gmail_sync"]
