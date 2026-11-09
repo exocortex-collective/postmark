@@ -1,26 +1,48 @@
 -- Migration: the role cryo-bridge uses to put mail-derived tasks on cryo's queue
 -- Related: cortex-wznn, cryo docs/MAIL-TASK-CONTRACT.md §4
 --
--- cryo's migration grants this role EXECUTE on cryo.enqueue_mail() (and USAGE
--- on schema cryo), and nothing else. Its GRANT fails if the role does not
--- exist, so this runs FIRST.
+-- Run against the `cortex` database as the superuser. Safe to run twice.
 --
--- The role is created NOLOGIN. The password lives in stack 48's Env, not here,
--- so login is enabled by hand at deploy, run as the superuser:
+-- !! ORDER !!
+--   1. This migration. cryo's GRANT ... TO cortex_cryo_bridge fails without it.
+--   2. cryo's migration: cryo.enqueue_mail(), and EXECUTE on it plus USAGE on
+--      schema cryo granted to this role (cryo-backend).
+--   3. Enable login, with the password from stack 48's Env
+--      (CORTEX_CRYO_BRIDGE_PASSWORD), without putting it in a command line or
+--      the server log:
+--        docker exec -i -e CORTEX_CRYO_BRIDGE_PASSWORD cortex-postgres \
+--          psql -v ON_ERROR_STOP=1 -U cortex -d cortex <<'SQL'
+--        SET log_statement = 'none';
+--        \getenv pw CORTEX_CRYO_BRIDGE_PASSWORD
+--        ALTER ROLE cortex_cryo_bridge LOGIN PASSWORD :'pw';
+--        SQL
+--      Then check that it connects over TCP as the role:
+--        SELECT has_function_privilege('cryo.enqueue_mail(text,jsonb,text,text)', 'EXECUTE');
+--   4. Deploy cortex-actions with CRYO_DRAIN_ENABLED=false, then flip it to true.
+--   Out of order: a flag flipped before step 2 fails every self-note job with
+--   undefined_function, and before step 3 with a login failure. Either way the
+--   job retries, then dead-letters, and nothing reaches cryo.
 --
---   ALTER ROLE cortex_cryo_bridge LOGIN PASSWORD '<CORTEX_CRYO_BRIDGE_PASSWORD>';
+-- WHAT THE ROLE CAN DO: whatever cryo grants it, plus PUBLIC's defaults, which a
+-- per-role REVOKE cannot remove: CONNECT and TEMP on the database, USAGE on
+-- schema public, and EXECUTE on functions that did not revoke it from PUBLIC
+-- (today only trigger functions, none SECURITY DEFINER; a future SECURITY
+-- DEFINER function must REVOKE ... FROM PUBLIC). It can read and write no
+-- table. The contract's "only the function writes mail/ rows" holds for this
+-- role only; every other cortex service still connects as the superuser.
 --
--- cryo-bridge keeps its existing `cortex` connection for the queue and the
--- email tables, and opens a second connection as this role only to call
--- cryo.enqueue_mail().
---
--- Safe to run twice.
+-- ROLLBACK: set CRYO_DRAIN_ENABLED=false; ALTER ROLE cortex_cryo_bridge NOLOGIN;
+-- cryo reverts its grants (or DROP OWNED BY cortex_cryo_bridge); DROP ROLE.
 
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'cortex_cryo_bridge') THEN
-        CREATE ROLE cortex_cryo_bridge
-            NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION;
-    END IF;
+    CREATE ROLE cortex_cryo_bridge NOLOGIN;
+EXCEPTION WHEN duplicate_object THEN
+    NULL;
 END
 $$;
+
+-- Attributes converge on every run; LOGIN and the password are step 3's.
+ALTER ROLE cortex_cryo_bridge
+    NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS
+    CONNECTION LIMIT 2;
